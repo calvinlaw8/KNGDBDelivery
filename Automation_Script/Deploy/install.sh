@@ -41,34 +41,111 @@ ask_secret() {
 }
 
 ask_node_group() {
-  local label="$1" prefix="$2" i confirm
+  local label="$1" prefix="$2" i
   local ip hostname
-  while true; do
-    for i in 1 2 3; do
-      ask "${label} 节点${i} IP"; ip="${ANSWER}"
-      ask "${label} 节点${i} 主机名"; hostname="${ANSWER}"
-      case "${prefix}" in
-        REDIS) REDIS_IPS[$((i - 1))]="${ip}"; REDIS_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-        RABBITMQ) RABBITMQ_IPS[$((i - 1))]="${ip}"; RABBITMQ_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-        MONGODB) MONGODB_IPS[$((i - 1))]="${ip}"; MONGODB_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-        MYSQL) MYSQL_IPS[$((i - 1))]="${ip}"; MYSQL_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-        *) die "未知节点组：${prefix}" ;;
-      esac
-    done
-
-    info "${label} 节点配置确认"
+  for i in 1 2 3; do
+    ask "${label} 节点${i} IP"; ip="${ANSWER}"
+    ask "${label} 节点${i} 主机名"; hostname="${ANSWER}"
     case "${prefix}" in
-      REDIS) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${REDIS_IPS[$i]}" "${REDIS_HOSTNAMES[$i]}"; done ;;
-      RABBITMQ) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${RABBITMQ_IPS[$i]}" "${RABBITMQ_HOSTNAMES[$i]}"; done ;;
-      MONGODB) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${MONGODB_IPS[$i]}" "${MONGODB_HOSTNAMES[$i]}"; done ;;
-      MYSQL) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${MYSQL_IPS[$i]}" "${MYSQL_HOSTNAMES[$i]}"; done ;;
+      REDIS) REDIS_IPS[$((i - 1))]="${ip}"; REDIS_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+      RABBITMQ) RABBITMQ_IPS[$((i - 1))]="${ip}"; RABBITMQ_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+      MONGODB) MONGODB_IPS[$((i - 1))]="${ip}"; MONGODB_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+      MYSQL) MYSQL_IPS[$((i - 1))]="${ip}"; MYSQL_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+      *) die "未知节点组：${prefix}" ;;
     esac
-    ask "以上 ${label} 配置是否正确？输入 n 重新录入，直接回车确认" "y"
-    confirm="${ANSWER}"
-    case "${confirm}" in
-      [Nn]) warn "重新录入 ${label} 节点配置" ;;
+  done
+}
+
+ask_management_config() {
+  ask "Ansible 管理节点 IP"; ANSIBLE_NODE_IP="${ANSWER}"
+  ask "Ansible 管理节点主机名"; ANSIBLE_NODE_HOSTNAME="${ANSWER}"
+  ask "Ansible 管理节点账号"; ANSIBLE_NODE_USER="${ANSWER}"
+  ask_secret "Ansible 管理节点密码"; ANSIBLE_NODE_PASS="${ANSWER}"
+}
+
+ask_database_ssh_config() {
+  ask "数据库服务器 SSH 账号"; DB_USER="${ANSWER}"
+  ask_secret "数据库服务器 SSH 密码"; DB_PASS="${ANSWER}"
+}
+
+ask_component_config() {
+  ask_secret "Redis 密码"; redis_password="${ANSWER}"
+  ask_secret "RabbitMQ Erlang Cookie"; rabbitmq_cookie="${ANSWER}"
+  ask_secret "RabbitMQ admin 密码"; rabbitmq_admin_password="${ANSWER}"
+  ask_secret "MongoDB admin 密码"; mongodb_admin_password="${ANSWER}"
+  ask_secret "MySQL root 密码"; mysql_root_password="${ANSWER}"
+  ask_secret "MySQL replication 密码"; mysql_repl_password="${ANSWER}"
+  ask "MySQL Keepalived VIP"; mysql_vip="${ANSWER}"
+  ask_secret "Keepalived auth_pass"; keepalived_auth_pass="${ANSWER}"
+}
+
+show_node_group() {
+  local label="$1" prefix="$2" i
+  printf '%s：\n' "${label}"
+  case "${prefix}" in
+    REDIS) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${REDIS_IPS[$i]}" "${REDIS_HOSTNAMES[$i]}"; done ;;
+    RABBITMQ) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${RABBITMQ_IPS[$i]}" "${RABBITMQ_HOSTNAMES[$i]}"; done ;;
+    MONGODB) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${MONGODB_IPS[$i]}" "${MONGODB_HOSTNAMES[$i]}"; done ;;
+    MYSQL) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${MYSQL_IPS[$i]}" "${MYSQL_HOSTNAMES[$i]}"; done ;;
+  esac
+}
+
+show_overview() {
+  info "部署参数总览"
+  printf 'Ansible 管理节点：%s (%s)，账号：%s\n' "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_HOSTNAME}" "${ANSIBLE_NODE_USER}"
+  printf '管理节点密码：已输入\n'
+  printf '数据库 SSH 账号：%s，密码：已输入\n' "${DB_USER}"
+  show_node_group "REDIS group" REDIS
+  show_node_group "RABBITMQ group" RABBITMQ
+  show_node_group "MONGODB group" MONGODB
+  show_node_group "MYSQL group" MYSQL
+  printf '组件密码/Cookie：已输入\nMySQL Keepalived VIP：%s\n' "${mysql_vip}"
+}
+
+reset_configuration() {
+  local choice
+  info "Which option will you want reset"
+  printf '1. REDIS group\n2. RABBITMQ group\n3. MONGODB group\n4. MYSQL group\n'
+  printf '5. Ansible management node\n6. Database SSH\n7. Component credentials\n8. all reset\n'
+  while true; do
+    ask "请选择要修改的组（1-8）"
+    choice="${ANSWER}"
+    case "${choice}" in
+      1) ask_node_group "Redis" REDIS; return ;;
+      2) ask_node_group "RabbitMQ" RABBITMQ; return ;;
+      3) ask_node_group "MongoDB" MONGODB; return ;;
+      4) ask_node_group "MySQL" MYSQL; return ;;
+      5) ask_management_config; return ;;
+      6) ask_database_ssh_config; return ;;
+      7) ask_component_config; return ;;
+      8) collect_all_inputs; return ;;
+      *) warn "请输入 1 到 8" ;;
+    esac
+  done
+}
+
+collect_all_inputs() {
+  ask_management_config
+  info "数据库服务器 SSH 配置"
+  ask_database_ssh_config
+  ask_node_group "Redis" REDIS
+  ask_node_group "RabbitMQ" RABBITMQ
+  ask_node_group "MongoDB" MONGODB
+  ask_node_group "MySQL" MYSQL
+  info "组件配置"
+  ask_component_config
+}
+
+confirm_overview() {
+  local answer
+  while true; do
+    show_overview
+    ask "以上参数是否确定？输入 n 选择修改项，直接回车确认" "y"
+    answer="${ANSWER}"
+    case "${answer}" in
       [Yy]) return ;;
-      *) warn "请输入 y 确认，或输入 n 重新录入" ;;
+      [Nn]) reset_configuration ;;
+      *) warn "请输入 y 确认，或输入 n 选择修改项" ;;
     esac
   done
 }
@@ -131,28 +208,8 @@ main() {
   info "交付五一键部署向导"
   warn "密码和 Cookie 只保存到 ${RUNTIME_DIR}，不会写入 Git 或普通操作日志。"
 
-  ask "Ansible 管理节点 IP"; ANSIBLE_NODE_IP="${ANSWER}"
-  ask "Ansible 管理节点主机名"; ANSIBLE_NODE_HOSTNAME="${ANSWER}"
-  ask "Ansible 管理节点账号"; ANSIBLE_NODE_USER="${ANSWER}"
-  ask_secret "Ansible 管理节点密码"; ANSIBLE_NODE_PASS="${ANSWER}"
-
-  info "数据库服务器 SSH 配置"
-  ask "数据库服务器 SSH 账号"; DB_USER="${ANSWER}"
-  ask_secret "数据库服务器 SSH 密码"; DB_PASS="${ANSWER}"
-  ask_node_group "Redis" REDIS
-  ask_node_group "RabbitMQ" RABBITMQ
-  ask_node_group "MongoDB" MONGODB
-  ask_node_group "MySQL" MYSQL
-
-  info "组件配置"
-  ask_secret "Redis 密码"; redis_password="${ANSWER}"
-  ask_secret "RabbitMQ Erlang Cookie"; rabbitmq_cookie="${ANSWER}"
-  ask_secret "RabbitMQ admin 密码"; rabbitmq_admin_password="${ANSWER}"
-  ask_secret "MongoDB admin 密码"; mongodb_admin_password="${ANSWER}"
-  ask_secret "MySQL root 密码"; mysql_root_password="${ANSWER}"
-  ask_secret "MySQL replication 密码"; mysql_repl_password="${ANSWER}"
-  ask "MySQL Keepalived VIP"; mysql_vip="${ANSWER}"
-  ask_secret "Keepalived auth_pass"; keepalived_auth_pass="${ANSWER}"
+  collect_all_inputs
+  confirm_overview
 
   write_runtime_config
   yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/all.yml" mongodb_primary_ip "${MONGODB_IPS[0]}"
