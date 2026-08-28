@@ -45,7 +45,6 @@ bash init_ansible.sh deploy
 │       └── site/                          # Redis/RabbitMQ/MongoDB/MySQL Playbook
 ├── 离线安装包/                             # 统一安装方式对应的离线载荷
 ├── 验收记录/                               # 部署验收记录模板
-├── 机密配置模板/                           # 凭据管理说明
 ├── 版本清单与SHA256.md                     # 版本和完整性校验说明
 └── 操作日志.md                             # 本交付包操作记录
 ```
@@ -69,8 +68,7 @@ bash init_ansible.sh deploy
 2. 编辑 `Automation_Script/Deploy/playbooks/group_vars/` 下的组件变量文件，填写拓扑、版本和凭据。
 3. 真实密码不得写入 README、操作日志、命令行参数或 Git；应使用现场受控配置或受控终端输入。
 4. 检查每个 `CHANGE_ME` 均已替换，并确认没有重复 IP、重复主机名或 VIP 与节点地址冲突。
-5. 不要直接修改 `已测试——交付三/`；交付三是测试基线，交付五是独立交付目录。
-6. 在统一安装方式、依赖和自动化安装流程完成离线验证前，不得执行生产部署。
+5. 在统一安装方式、依赖和自动化安装流程完成离线验证前，不得执行生产部署。
 
 凭据配置要求详见 `Automation_Script/Deploy/config.env.example` 和 `README.md` 中的安全要求。
 
