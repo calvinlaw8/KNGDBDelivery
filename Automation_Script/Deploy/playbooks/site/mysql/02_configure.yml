@@ -1,0 +1,244 @@
+---
+# ============================================================
+# mysql/02_configure.yml  —  MySQL 配置（my.cnf + 初始化）
+# ============================================================
+# 目的：
+#   1. 根据 IP 查找当前节点的 server_id（from mysql_nodes 列表）
+#   2. 写入 my.cnf（GTID 配置，per-node server_id 和 report_host）
+#   3. 使用 Debian 包提供的 mysql.service（systemd）
+#   4. 执行 mysqld --initialize（serial:1，每节点独立）
+#   5. 捕获临时密码并修改 root 密码
+#   6. 启动 mysqld 服务
+# ============================================================
+
+- name: MySQL 配置 - my.cnf + mysql.service
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-configure
+
+  tasks:
+    - name: 查询当前节点 server_id
+      ansible.builtin.set_fact:
+        my_server_id: >-
+          {{
+            (mysql_nodes
+             | selectattr('ip', 'equalto', inventory_hostname)
+             | list
+             | first).server_id
+          }}
+
+    - name: 允许 AppArmor 访问自定义 MySQL 数据目录
+      ansible.builtin.blockinfile:
+        path: /etc/apparmor.d/local/usr.sbin.mysqld
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+        marker: "# {mark} Ansible MySQL data directory"
+        block: |
+          capability chown,
+          capability dac_read_search,
+          {{ mysql_data_dir }}/ rw,
+          {{ mysql_data_dir }}/** rwk,
+      become: true
+
+    - name: 重新加载 MySQL AppArmor profile
+      ansible.builtin.command: apparmor_parser -r /etc/apparmor.d/usr.sbin.mysqld
+      changed_when: true
+      become: true
+
+    - name: 创建 /etc/mysql 配置目录
+      ansible.builtin.file:
+        path: /etc/mysql
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+
+    - name: 创建 MySQL 数据和日志目录
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: mysql
+        group: mysql
+        mode: "0750"
+      loop:
+        - { path: "{{ mysql_data_dir }}" }
+        - { path: "{{ mysql_log_dir }}" }
+      become: true
+
+    - name: 兼容 libaio.so.1（Ubuntu 24.04 改名为 libaio1t64）
+      ansible.builtin.file:
+        src: /usr/lib/x86_64-linux-gnu/libaio.so.1t64
+        dest: /usr/lib/x86_64-linux-gnu/libaio.so.1
+        state: link
+      become: true
+      when: ansible_facts is not defined or true   # 始终执行（幂等）
+
+    - name: 写入 my.cnf（GTID 主从配置）
+      ansible.builtin.copy:
+        dest: "{{ mysql_config_file }}"
+        content: |
+          [mysqld]
+          # 基础配置
+          basedir          = /usr
+          datadir          = {{ mysql_data_dir }}
+          socket           = /tmp/mysql.sock
+          pid-file         = {{ mysql_data_dir }}/mysqld.pid
+          port             = {{ mysql_port }}
+
+          # 字符集
+          character-set-server = utf8mb4
+          collation-server     = utf8mb4_unicode_ci
+
+          # 节点标识
+          server-id        = {{ my_server_id }}
+          report_host      = {{ inventory_hostname }}
+
+          # GTID 配置
+          gtid_mode            = ON
+          enforce_gtid_consistency = ON
+          log_bin              = {{ mysql_log_dir }}/mysql-bin
+          binlog_format        = ROW
+          log_slave_updates    = ON
+          relay-log            = {{ mysql_log_dir }}/relay-bin
+
+          # 复制安全
+          read_only            = ON
+          super_read_only      = OFF
+
+          # InnoDB
+          innodb_buffer_pool_size = 512M
+          innodb_log_file_size    = 128M
+
+          # 错误日志
+          log-error            = {{ mysql_log_dir }}/mysqld.err
+
+          [client]
+          socket = /tmp/mysql.sock
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+
+- name: MySQL 配置 - 初始化数据目录（serial=1，避免并发）
+  hosts: mysql
+  gather_facts: false
+  serial: 1
+  tags: mysql, mysql-initialize
+
+  tasks:
+    - name: 检查数据目录是否已初始化（mysql 系统库存在性判断）
+      ansible.builtin.stat:
+        path: "{{ mysql_data_dir }}/mysql"
+      register: mysql_db_dir
+
+    - name: 初始化 MySQL 数据目录（mysqld --initialize，约 30-60 秒，每 10 秒汇报一次）
+      ansible.builtin.file:
+        path: "{{ mysql_data_dir }}"
+        state: absent
+      when: not mysql_db_dir.stat.exists
+      become: true
+
+    - name: 清理未初始化节点的残留错误日志
+      ansible.builtin.file:
+        path: "{{ mysql_log_dir }}/mysqld.err"
+        state: absent
+      when: not mysql_db_dir.stat.exists
+      become: true
+
+    - name: 初始化 MySQL 数据目录（mysqld --initialize，约 30-60 秒，每 10 秒汇报一次）
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          parent_dir="$(dirname '{{ mysql_data_dir }}')"
+          parent_owner="$(stat -c '%u:%g' "${parent_dir}")"
+          parent_mode="$(stat -c '%a' "${parent_dir}")"
+          chown mysql:mysql "${parent_dir}"
+          restore_parent_mode() {
+            chown "${parent_owner}" "${parent_dir}"
+            chmod "${parent_mode}" "${parent_dir}"
+          }
+          trap restore_parent_mode EXIT
+          {{ mysql_server_bin }} \
+            --defaults-file={{ mysql_config_file }} \
+            --initialize \
+            --user=mysql \
+            --basedir={{ mysql_base_dir }} \
+            --datadir={{ mysql_data_dir }}
+      when: not mysql_db_dir.stat.exists
+      register: init_result
+      async: 300
+      poll: 10
+      become: true
+
+    - name: 捕获临时 root 密码
+      ansible.builtin.shell:
+        cmd: >
+          grep -oP '(?<=A temporary password is generated for root@localhost: )\S+'
+          {{ mysql_log_dir }}/mysqld.err
+      register: temp_password
+      changed_when: false
+      when: not mysql_db_dir.stat.exists
+      become: true
+      failed_when: temp_password.rc != 0
+
+    - name: 启动 mysqld（使用临时密码）
+      ansible.builtin.systemd:
+        name: "{{ mysql_service_name }}"
+        state: started
+        enabled: true
+        daemon_reload: true
+      when: not mysql_db_dir.stat.exists
+      become: true
+
+    - name: 等待 mysqld 启动（监听 3306）
+      ansible.builtin.wait_for:
+        port: "{{ mysql_port }}"
+        host: "{{ inventory_hostname }}"
+        timeout: 30
+      delegate_to: localhost
+      when: not mysql_db_dir.stat.exists
+
+    - name: 修改 root 密码（使用临时密码连接）
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          --connect-expired-password
+          -u root
+          -p"{{ temp_password.stdout }}"
+          -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
+      when: not mysql_db_dir.stat.exists
+      become: true
+      no_log: true
+
+    # 若数据目录已存在（重新执行时），直接启动
+    - name: 启动 mysqld（幂等，已初始化场景）
+      ansible.builtin.systemd:
+        name: "{{ mysql_service_name }}"
+        state: started
+        enabled: true
+        daemon_reload: true
+      when: mysql_db_dir.stat.exists
+      become: true
+
+    - name: 等待 mysqld 就绪（已初始化场景）
+      ansible.builtin.wait_for:
+        port: "{{ mysql_port }}"
+        host: "{{ inventory_hostname }}"
+        timeout: 30
+      delegate_to: localhost
+      when: mysql_db_dir.stat.exists
+
+    - name: 验证 mysqld 服务状态
+      ansible.builtin.command: "systemctl is-active {{ mysql_service_name }}"
+      register: mysqld_active
+      changed_when: false
+      failed_when: mysqld_active.stdout != "active"
+      become: true
+
+    - name: 显示节点初始化结果
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: mysqld = {{ mysqld_active.stdout }}, server_id = {{ my_server_id }}"

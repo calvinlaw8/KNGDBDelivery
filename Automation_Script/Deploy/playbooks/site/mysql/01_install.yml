@@ -1,0 +1,63 @@
+---
+# ============================================================
+# mysql/01_install.yml  —  MySQL 8.4.11 .deb 安装
+# ============================================================
+# 目的：分发 MySQL 官方 .deb 运行时包并通过本地 APT 安装
+# 离线包路径（Ansible-01）：{{ mysql_pkg_dir }}/*.deb
+# ============================================================
+
+- name: MySQL 安装 - 分发并安装 .deb 包
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-install
+
+  tasks:
+    - name: 清理旧 MySQL 离线包暂存目录
+      ansible.builtin.file:
+        path: /tmp/mysql
+        state: absent
+      become: true
+
+    - name: 创建目标暂存目录
+      ansible.builtin.file:
+        path: /tmp/mysql
+        state: directory
+        mode: "0755"
+      become: true
+
+    - name: 分发 MySQL .deb 包
+      ansible.builtin.copy:
+        src: "{{ mysql_pkg_dir }}/"
+        dest: /tmp/mysql/
+        owner: root
+        mode: "0644"
+      become: true
+
+    - name: 检查 MySQL .deb 包非空
+      ansible.builtin.shell:
+        cmd: find /tmp/mysql -maxdepth 1 -type f -name '*.deb' | wc -l
+      register: deb_count
+      changed_when: false
+      become: true
+
+    - name: 拒绝空的 MySQL 包目录
+      ansible.builtin.assert:
+        that: deb_count.stdout | int > 0
+        fail_msg: "{{ inventory_hostname }} 未收到 MySQL .deb 包"
+
+    - name: 通过本地包缓存安装 MySQL（不下载、不删除）
+      ansible.builtin.shell:
+        cmd: find /tmp/mysql -maxdepth 1 -type f -name '*.deb' -print0 | xargs -0 dpkg -i
+      register: mysql_install
+      changed_when: "'Setting up mysql-community-server' in mysql_install.stdout"
+      become: true
+
+    - name: 验证 MySQL 版本
+      ansible.builtin.command: mysql --version
+      register: mysql_version
+      changed_when: false
+      become: true
+
+    - name: 显示版本
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ mysql_version.stdout }}"

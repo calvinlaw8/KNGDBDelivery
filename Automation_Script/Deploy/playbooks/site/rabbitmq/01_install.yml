@@ -1,0 +1,106 @@
+---
+# ============================================================
+# rabbitmq/01_install.yml  —  RabbitMQ 4.2.9 + Erlang 27 离线安装
+# ============================================================
+# 目的：将 RabbitMQ 4.2.9 与 Erlang 27.3.4.16 离线包分发到 3 台节点并安装
+# 离线包路径（Ansible-01）：{{ rabbitmq_pkg_dir }}/*.deb
+# ============================================================
+
+- name: RabbitMQ 安装 - 分发离线包并安装
+  hosts: rabbitmq
+  gather_facts: false
+  tags: rabbitmq, rabbitmq-install
+
+  tasks:
+    - name: 清理旧 RabbitMQ 离线包暂存目录
+      ansible.builtin.file:
+        path: /tmp/rabbitmq
+        state: absent
+      become: true
+
+    - name: 创建目标暂存目录
+      ansible.builtin.file:
+        path: /tmp/rabbitmq
+        state: directory
+        mode: "0755"
+      become: true
+
+    - name: 分发所有 .deb 包
+      ansible.builtin.copy:
+        src: "{{ rabbitmq_pkg_dir }}/"
+        dest: /tmp/rabbitmq/
+        owner: root
+        mode: "0644"
+      become: true
+
+    - name: 验证 .deb 包已上传
+      ansible.builtin.shell:
+        cmd: find /tmp/rabbitmq -maxdepth 1 -type f -name '*.deb' | wc -l
+      register: deb_count
+      changed_when: false
+      become: true
+
+    - name: 检查包数量非空
+      ansible.builtin.assert:
+        that: deb_count.stdout | int > 0
+        fail_msg: >-
+          {{ inventory_hostname }} 暂存目录中 .deb 数量为
+          {{ deb_count.stdout }}，请检查上传是否完整。
+
+    - name: 阻止 dpkg 维护脚本在安装期间自动启动 RabbitMQ
+      ansible.builtin.copy:
+        dest: /usr/sbin/policy-rc.d
+        content: "#!/bin/sh\nexit 101\n"
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+
+    - name: 屏蔽 RabbitMQ systemd 服务，避免 postinst 显式重启
+      ansible.builtin.command: systemctl mask rabbitmq-server.service
+      changed_when: false
+      become: true
+
+    - name: 通过本地包缓存安装 RabbitMQ（不下载、不删除）
+      block:
+        - name: 执行离线 dpkg 安装
+          ansible.builtin.shell:
+            cmd: dpkg -i /tmp/rabbitmq/*.deb
+          register: dpkg_result
+          changed_when: "'Setting up rabbitmq-server' in dpkg_result.stdout"
+          become: true
+      always:
+        - name: 解除 RabbitMQ systemd 服务屏蔽
+          ansible.builtin.command: systemctl unmask rabbitmq-server.service
+          changed_when: false
+          become: true
+
+        - name: 删除安装期间的临时启动策略
+          ansible.builtin.file:
+            path: /usr/sbin/policy-rc.d
+            state: absent
+          become: true
+
+    - name: 显示 dpkg 安装结果
+      ansible.builtin.debug:
+        msg: "{{ dpkg_result.stdout_lines | select('match', '^(Setting up|Selecting|Processing)') | list }}"
+      when: dpkg_result.stdout_lines is defined
+
+    - name: 写入统一 Erlang Cookie 供 RabbitMQ CLI 使用
+      ansible.builtin.copy:
+        dest: /var/lib/rabbitmq/.erlang.cookie
+        content: "{{ erlang_cookie }}"
+        owner: rabbitmq
+        group: rabbitmq
+        mode: "0400"
+      become: true
+
+    - name: 验证 RabbitMQ 版本
+      ansible.builtin.command: rabbitmqctl version
+      register: rmq_version
+      changed_when: false
+      become: true
+
+    - name: 显示 RabbitMQ 版本
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: RabbitMQ {{ rmq_version.stdout }}"

@@ -1,0 +1,62 @@
+---
+# ============================================================
+# mongodb/01_install.yml  —  MongoDB 8.2.12 .deb 安装
+# ============================================================
+# 目的：分发 MongoDB 官方 .deb 运行时包并通过本地 APT 安装
+# 离线包路径（Ansible-01）：{{ mongodb_pkg_dir }}/*.deb
+# ============================================================
+
+- name: MongoDB 安装 - 分发并安装 .deb 包
+  hosts: mongodb
+  gather_facts: false
+  tags: mongodb, mongodb-install
+
+  tasks:
+    - name: 清理旧 MongoDB 离线包暂存目录
+      ansible.builtin.file:
+        path: /tmp/mongodb
+        state: absent
+      become: true
+
+    - name: 创建目标暂存目录
+      ansible.builtin.file:
+        path: /tmp/mongodb
+        state: directory
+        mode: "0755"
+      become: true
+
+    - name: 分发 MongoDB .deb 包
+      ansible.builtin.copy:
+        src: "{{ mongodb_pkg_dir }}/"
+        dest: /tmp/mongodb/
+        owner: root
+        mode: "0644"
+      become: true
+
+    - name: 检查 MongoDB .deb 包非空
+      ansible.builtin.shell:
+        cmd: find /tmp/mongodb -maxdepth 1 -type f -name '*.deb' | wc -l
+      register: deb_count
+      changed_when: false
+      become: true
+
+    - name: 拒绝空的 MongoDB 包目录
+      ansible.builtin.assert:
+        that: deb_count.stdout | int > 0
+        fail_msg: "{{ inventory_hostname }} 未收到 MongoDB .deb 包"
+
+    - name: 通过本地包缓存安装 MongoDB（不下载、不删除）
+      ansible.builtin.shell:
+        cmd: find /tmp/mongodb -maxdepth 1 -type f -name '*.deb' -print0 | xargs -0 dpkg -i
+      register: mongodb_install
+      changed_when: "'Setting up mongodb-org-server' in mongodb_install.stdout"
+      become: true
+
+    - name: 验证 mongod 版本
+      ansible.builtin.command: mongod --version
+      register: mongod_version
+      changed_when: false
+
+    - name: 显示版本
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ mongod_version.stdout_lines[0] }}"

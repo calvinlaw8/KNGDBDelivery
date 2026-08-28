@@ -1,0 +1,26 @@
+# ============================================================
+# group_vars/redis.yml  —  Redis 集群变量
+# ============================================================
+
+redis_version: "8.2.8"
+
+# 网络
+redis_port: 6379
+redis_bind: "0.0.0.0"
+
+# 认证密码（主从复制及 Sentinel 共用）
+redis_password: "CHANGE_ME"
+
+# 主从拓扑
+redis_master_ip: "10.20.14.41"
+redis_replicas:
+  - "10.20.14.42"
+  - "10.20.14.43"
+
+# Sentinel 配置
+sentinel_port: 26379
+sentinel_master_name: "mymaster"
+sentinel_quorum: 2
+sentinel_down_after_ms: 30000
+sentinel_failover_timeout: 180000
+sentinel_parallel_syncs: 1

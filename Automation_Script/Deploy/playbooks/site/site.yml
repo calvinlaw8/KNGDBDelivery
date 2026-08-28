@@ -1,0 +1,85 @@
+---
+# ============================================================
+# site.yml  —  总入口（完整一键部署）
+# ============================================================
+# 执行顺序：
+#   00_preflight   → 连通性 + sudo + 离线包目录检查
+#   01_server_init → /etc/hosts 写入 12 台 DB 节点
+#   redis/         → 01_install → 02_configure → 03_sentinel → 04_verify
+#   rabbitmq/      → 01_install → 02_configure → 03_verify
+#   mongodb/       → 01_install → 02_configure → 03_auth → 04_verify
+#   mysql/         → 01_install → 02_configure → 03_replication → 04_keepalived → 05_verify
+#
+# 使用方式（在 Ansible-01 上）：
+#   # 全量部署
+#   ansible-playbook site.yml
+#
+#   # 只执行某一组
+#   ansible-playbook site.yml --tags redis
+#   ansible-playbook site.yml --tags rabbitmq
+#   ansible-playbook site.yml --tags mongodb
+#   ansible-playbook site.yml --tags mysql
+#
+#   前置检查为强制门禁，不得使用 --skip-tags preflight 绕过。
+#   （inventory 由 init Step 7 写入 /etc/ansible/hosts，ansible.cfg 已设默认值）
+# ============================================================
+
+# ── 前置检查 ──────────────────────────────────────────────
+- name: 前置检查
+  import_playbook: ../preflights/00_preflight.yml
+
+# ── 服务器初始化 ───────────────────────────────────────────
+- name: DB 服务器初始化（写 /etc/hosts）
+  import_playbook: ../preflights/01_server_init.yml
+
+# ── Redis 集群 ────────────────────────────────────────────
+- name: Redis - 离线安装
+  import_playbook: redis/01_install.yml
+
+- name: Redis - 配置（主 + 从）
+  import_playbook: redis/02_configure.yml
+
+- name: Redis - Sentinel
+  import_playbook: redis/03_sentinel.yml
+
+- name: Redis - 验证
+  import_playbook: redis/04_verify.yml
+
+# ── RabbitMQ 集群 ─────────────────────────────────────────
+- name: RabbitMQ - 离线安装
+  import_playbook: rabbitmq/01_install.yml
+
+- name: RabbitMQ - 集群配置
+  import_playbook: rabbitmq/02_configure.yml
+
+- name: RabbitMQ - 验证
+  import_playbook: rabbitmq/03_verify.yml
+
+# ── MongoDB 副本集 ─────────────────────────────────────────
+- name: MongoDB - 离线安装
+  import_playbook: mongodb/01_install.yml
+
+- name: MongoDB - 副本集初始化
+  import_playbook: mongodb/02_configure.yml
+
+- name: MongoDB - 用户 & keyFile 认证
+  import_playbook: mongodb/03_auth.yml
+
+- name: MongoDB - 验证
+  import_playbook: mongodb/04_verify.yml
+
+# ── MySQL GTID 主从 + Keepalived ──────────────────────────
+- name: MySQL - 离线安装
+  import_playbook: mysql/01_install.yml
+
+- name: MySQL - 配置 & 初始化
+  import_playbook: mysql/02_configure.yml
+
+- name: MySQL - 主从复制（GTID）
+  import_playbook: mysql/03_replication.yml
+
+- name: MySQL - Keepalived VIP
+  import_playbook: mysql/04_keepalived.yml
+
+- name: MySQL - 验证
+  import_playbook: mysql/05_verify.yml

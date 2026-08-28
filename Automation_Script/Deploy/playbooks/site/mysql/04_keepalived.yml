@@ -1,0 +1,203 @@
+---
+# ============================================================
+# mysql/04_keepalived.yml  —  Keepalived VIP 安装与配置
+# ============================================================
+# 目的：
+#   1. 安装 Keepalived（4 个 .deb 离线包）
+#   2. 根据每台节点 IP 写入对应的 keepalived.conf
+#      （state=MASTER/BACKUP，priority=100/90/80）
+#   3. 启动 keepalived 服务，验证 VIP 绑定至 Primary
+# ============================================================
+
+- name: Keepalived 安装 - 离线 .deb 包
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-keepalived
+
+  tasks:
+    - name: 创建临时 deb 目录
+      ansible.builtin.file:
+        path: /tmp/keepalived_deb
+        state: directory
+        mode: "0755"
+      become: true
+
+    - name: 分发 libsnmp-base.deb
+      ansible.builtin.copy:
+        src: "{{ mysql_pkg_dir }}/libsnmp-base_5.9.4+dfsg-1.1ubuntu3.2_all.deb"
+        dest: /tmp/keepalived_deb/libsnmp-base_5.9.4+dfsg-1.1ubuntu3.2_all.deb
+        owner: root
+        mode: "0644"
+      become: true
+
+    - name: 分发 libsnmp40t64.deb
+      ansible.builtin.copy:
+        src: "{{ mysql_pkg_dir }}/libsnmp40t64_5.9.4+dfsg-1.1ubuntu3.2_amd64.deb"
+        dest: /tmp/keepalived_deb/libsnmp40t64_5.9.4+dfsg-1.1ubuntu3.2_amd64.deb
+        owner: root
+        mode: "0644"
+      become: true
+
+    - name: 分发 libpopt0.deb
+      ansible.builtin.copy:
+        src: "{{ mysql_pkg_dir }}/libpopt0_1.19+dfsg-1build1_amd64.deb"
+        dest: /tmp/keepalived_deb/libpopt0_1.19+dfsg-1build1_amd64.deb
+        owner: root
+        mode: "0644"
+      become: true
+
+    - name: 分发 keepalived.deb
+      ansible.builtin.copy:
+        src: "{{ mysql_pkg_dir }}/keepalived_2.2.8-1build2_amd64.deb"
+        dest: /tmp/keepalived_deb/keepalived_2.2.8-1build2_amd64.deb
+        owner: root
+        mode: "0644"
+      become: true
+
+    - name: 通过本地包缓存安装 Keepalived（不下载、不删除）
+      ansible.builtin.shell:
+        cmd: apt-get install -y --no-download --no-remove /tmp/keepalived_deb/*.deb
+      register: keepalived_install
+      changed_when: "'Setting up keepalived' in keepalived_install.stdout"
+      become: true
+
+    - name: 验证 keepalived 安装
+      ansible.builtin.shell:
+        cmd: dpkg -l keepalived 2>/dev/null | grep -c "^ii" || true
+      register: kp_check
+      changed_when: false
+      failed_when: kp_check.stdout | int == 0
+      become: true
+
+
+- name: Keepalived 配置 - per-node keepalived.conf
+  hosts: mysql
+  gather_facts: true
+  tags: mysql, mysql-keepalived
+
+  tasks:
+    - name: 查询当前节点 Keepalived state
+      ansible.builtin.set_fact:
+        my_kp_state: >-
+          {{
+            'MASTER'
+            if inventory_hostname == mysql_primary_ip
+            else 'BACKUP'
+          }}
+        keepalived_bind_interface: >-
+          {{
+            ansible_default_ipv4.interface
+            if keepalived_interface == 'auto'
+            else keepalived_interface
+          }}
+        my_kp_priority: >-
+          {{
+            (
+              mysql_nodes
+              | selectattr('ip', 'equalto', inventory_hostname)
+              | map(attribute='keepalived_priority')
+              | first
+            )
+            | default(80)
+          }}
+
+    - name: 写入 keepalived.conf（per-node state + priority）
+      ansible.builtin.copy:
+        dest: /etc/keepalived/keepalived.conf
+        content: |
+          ! Configuration File for keepalived
+
+          global_defs {
+            router_id {{ inventory_hostname }}
+          }
+
+          vrrp_script check_mysql {
+            script "pgrep mysqld"
+            interval 2
+            weight   -20
+            fall     2
+            rise     1
+          }
+
+          vrrp_instance VI_MYSQL {
+            state               {{ my_kp_state }}
+            interface           {{ keepalived_bind_interface }}
+            virtual_router_id   {{ keepalived_router_id }}
+            priority            {{ my_kp_priority }}
+            advert_int          1
+            nopreempt
+
+            authentication {
+              auth_type PASS
+              auth_pass {{ keepalived_auth_pass }}
+            }
+
+            virtual_ipaddress {
+              {{ mysql_vip }}/24
+            }
+
+            track_script {
+              check_mysql
+            }
+          }
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart keepalived
+
+    - name: 启动 keepalived 并设为开机自启
+      ansible.builtin.systemd:
+        name: keepalived
+        state: started
+        enabled: true
+        daemon_reload: true
+      become: true
+
+  handlers:
+    - name: restart keepalived
+      ansible.builtin.systemd:
+        name: keepalived
+        state: restarted
+        daemon_reload: true
+      become: true
+
+
+- name: Keepalived VIP 绑定验证
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-keepalived
+
+  tasks:
+    - name: 验证 keepalived 服务状态
+      ansible.builtin.command: systemctl is-active keepalived
+      register: kp_active
+      changed_when: false
+      failed_when: kp_active.stdout != "active"
+      become: true
+
+    - name: 显示节点 keepalived 状态
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: keepalived = {{ kp_active.stdout }}"
+
+    - name: 等待 VIP 浮动稳定（5 秒）
+      ansible.builtin.wait_for:
+        timeout: 5
+      delegate_to: localhost
+      run_once: true
+
+    - name: 检查 VIP 绑定（Primary 节点应持有 VIP）
+      when: inventory_hostname == mysql_primary_ip
+      ansible.builtin.shell:
+        cmd: ip addr show | grep -c "{{ mysql_vip }}" || true
+      register: vip_check
+      changed_when: false
+      become: true
+
+    - name: 断言 VIP 已绑定至 Primary
+      when: inventory_hostname == mysql_primary_ip
+      ansible.builtin.assert:
+        that:
+          - vip_check.stdout | int > 0
+        fail_msg: "VIP {{ mysql_vip }} 未绑定至 Primary {{ inventory_hostname }}！请检查 keepalived 日志"
+        success_msg: "VIP {{ mysql_vip }} 已成功绑定至 Primary {{ inventory_hostname }} ✅"

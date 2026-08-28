@@ -1,0 +1,146 @@
+---
+# ============================================================
+# 00_preflight.yml  —  前置检查
+# ============================================================
+# init_ansible.sh 已完成：
+#   - Ansible 安装（Step 3）
+#   - 免密 SSH + NOPASSWD sudo（Step 5/6）
+#   - Ansible-01 /etc/hosts 写入（Step 6b）
+#   - ansible db_all -m ping（Step 9）
+#
+# 本 Playbook 额外验证：
+#   1. 再次 ping 确认 12 台节点全部可达
+#   2. 验证各节点 sudo 权限正常
+#   3. 检查 Ansible-01 正式离线包目录与目标 .deb 元数据
+#      （redis / rabbitmq / mongodb / mysql 的包必须先 SCP 上传并通过版本校验）
+#
+# 执行方式（在 Ansible-01 上）：
+#   ansible-playbook 00_preflight.yml
+#   （inventory 由 init Step 7 写入 /etc/ansible/hosts，ansible.cfg 已设默认值）
+# ============================================================
+
+- name: 前置检查 - 节点连通性与 sudo 权限
+  hosts: db_all
+  gather_facts: true
+  tags: preflight
+
+  tasks:
+    - name: 断言操作系统与架构基线
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == required_os_distribution
+          - ansible_distribution_major_version == required_os_major_version
+          - ansible_architecture == required_architecture
+        fail_msg: >-
+          {{ inventory_hostname }} 不满足交付五基线：需要
+          {{ required_os_distribution }} {{ required_os_major_version }} x86_64，实际为
+          {{ ansible_distribution }} {{ ansible_distribution_version }} {{ ansible_architecture }}。
+        success_msg: "{{ inventory_hostname }} 操作系统基线通过"
+
+    - name: Ping 所有节点（连通性验证）
+      ansible.builtin.ping:
+
+    - name: 验证 sudo 权限（whoami 应为 root）
+      ansible.builtin.command: whoami
+      become: true
+      register: whoami_result
+      changed_when: false
+
+    - name: 断言 sudo 为 root
+      ansible.builtin.assert:
+        that: whoami_result.stdout == "root"
+        fail_msg: "{{ inventory_hostname }} sudo 权限异常（whoami={{ whoami_result.stdout }}）"
+        success_msg: "{{ inventory_hostname }} sudo 正常"
+
+    - name: 检查 dpkg 数据库健康状态
+      ansible.builtin.command: dpkg --audit
+      register: dpkg_audit
+      changed_when: false
+      become: true
+
+    - name: 断言 dpkg 数据库无遗留状态
+      ansible.builtin.assert:
+        that: dpkg_audit.stdout | trim == ""
+        fail_msg: >-
+          {{ inventory_hostname }} 存在 dpkg 未完成或损坏状态：
+          {{ dpkg_audit.stdout }}。请先修复后再执行交付五部署，禁止使用 --force-depends 绕过。
+        success_msg: "{{ inventory_hostname }} dpkg 数据库健康"
+
+
+- name: 前置检查 - Ansible-01 离线包目录验证
+  hosts: localhost
+  gather_facts: false
+  tags: preflight
+
+  tasks:
+    - name: 检查 Redis 离线包目录
+      ansible.builtin.stat:
+        path: "{{ redis_pkg_dir }}"
+      register: redis_pkg_stat
+
+    - name: 断言 Redis 离线包目录存在
+      ansible.builtin.assert:
+        that: redis_pkg_stat.stat.exists and redis_pkg_stat.stat.isdir
+        fail_msg: >
+          Redis 离线包目录不存在：{{ redis_pkg_dir }}
+          请先执行 SCP 将 Redis .deb 包上传至 Ansible-01
+        success_msg: "Redis 包目录就绪：{{ redis_pkg_dir }}"
+
+    - name: 检查 RabbitMQ 离线包目录
+      ansible.builtin.stat:
+        path: "{{ rabbitmq_pkg_dir }}"
+      register: rmq_pkg_stat
+
+    - name: 断言 RabbitMQ 离线包目录存在
+      ansible.builtin.assert:
+        that: rmq_pkg_stat.stat.exists and rmq_pkg_stat.stat.isdir
+        fail_msg: >
+          RabbitMQ 离线包目录不存在：{{ rabbitmq_pkg_dir }}
+          请先执行 SCP 将 RabbitMQ .deb 包上传至 Ansible-01
+        success_msg: "RabbitMQ 包目录就绪：{{ rabbitmq_pkg_dir }}"
+
+    - name: 检查 MongoDB 离线包目录
+      ansible.builtin.stat:
+        path: "{{ mongodb_pkg_dir }}"
+      register: mongo_pkg_stat
+
+    - name: 断言 MongoDB 离线包目录存在
+      ansible.builtin.assert:
+        that: mongo_pkg_stat.stat.exists and mongo_pkg_stat.stat.isdir
+        fail_msg: >
+          MongoDB 离线包目录不存在：{{ mongodb_pkg_dir }}
+          请先执行 SCP 将 MongoDB .deb 包上传至 Ansible-01
+        success_msg: "MongoDB 包目录就绪：{{ mongodb_pkg_dir }}"
+
+    - name: 检查 MySQL 离线包目录
+      ansible.builtin.stat:
+        path: "{{ mysql_pkg_dir }}"
+      register: mysql_pkg_stat
+
+    - name: 断言 MySQL 离线包目录存在
+      ansible.builtin.assert:
+        that: mysql_pkg_stat.stat.exists and mysql_pkg_stat.stat.isdir
+        fail_msg: >
+          MySQL 离线包目录不存在：{{ mysql_pkg_dir }}
+          请先执行 SCP 将 MySQL .deb 包上传至 Ansible-01
+        success_msg: "MySQL 包目录就绪：{{ mysql_pkg_dir }}"
+
+    - name: 验证正式离线 .deb 载荷版本与元数据
+      ansible.builtin.command:
+        cmd: >-
+          env PACKAGE_ROOT={{ staging_dir }}
+          bash {{ playbook_dir }}/../../validate_deb_payloads.sh
+      register: payload_validation
+      changed_when: false
+
+    - name: 显示正式离线载荷验证结果
+      ansible.builtin.debug:
+        var: payload_validation.stdout_lines
+
+    - name: 前置检查通过摘要
+      ansible.builtin.debug:
+        msg: >-
+          前置检查全部通过 ✅
+          - 12 台节点：可达 + sudo 正常
+          - 正式离线载荷：redis / rabbitmq / mongodb / mysql 均通过目标版本与 amd64 元数据检查
+          下一步：ansible-playbook 01_server_init.yml

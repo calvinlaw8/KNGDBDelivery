@@ -1,0 +1,183 @@
+---
+# ============================================================
+# rabbitmq/02_configure.yml  —  RabbitMQ 集群配置
+# ============================================================
+# 目的：
+#   1. 统一 3 节点 Erlang Cookie（必须完全一致才能组成集群）
+#   2. 启动 rabbitmq-server
+#   3. 其他节点 join 以变量中定义的种子节点为目标的集群
+#   4. 启用 Management Plugin
+#   5. 创建 admin 账号，删除 guest 账号
+# ============================================================
+
+- name: RabbitMQ 配置 - Erlang Cookie 和服务启动
+  hosts: rabbitmq
+  gather_facts: false
+  tags: rabbitmq, rabbitmq-cookie
+
+  tasks:
+    - name: 确保 /var/lib/rabbitmq 目录存在
+      ansible.builtin.file:
+        path: /var/lib/rabbitmq
+        state: directory
+        owner: rabbitmq
+        group: rabbitmq
+        mode: "0750"
+      become: true
+
+    - name: 写入统一 Erlang Cookie（3 节点必须完全一致）
+      ansible.builtin.copy:
+        dest: /var/lib/rabbitmq/.erlang.cookie
+        content: "{{ erlang_cookie }}"
+        owner: rabbitmq
+        group: rabbitmq
+        mode: "0400"
+      become: true
+      notify: restart rabbitmq-server
+
+    - name: 种子节点 - 启动 rabbitmq-server 并设为开机自启
+      ansible.builtin.systemd:
+        name: rabbitmq-server
+        state: started
+        enabled: true
+        daemon_reload: true
+      when: inventory_hostname == rabbitmq_seed_node_ip
+      become: true
+
+    - name: 等待种子节点 RabbitMQ 完全启动（15 秒）
+      ansible.builtin.wait_for:
+        timeout: 15
+      delegate_to: localhost
+      when: inventory_hostname == rabbitmq_seed_node_ip
+
+    - name: 验证种子节点 rabbitmq-server 状态
+      ansible.builtin.command: systemctl is-active rabbitmq-server
+      register: rmq_active
+      changed_when: false
+      failed_when: rmq_active.stdout != "active"
+      when: inventory_hostname == rabbitmq_seed_node_ip
+      become: true
+
+  handlers:
+    - name: restart rabbitmq-server
+      ansible.builtin.systemd:
+        name: rabbitmq-server
+        state: restarted
+        daemon_reload: true
+      become: true
+
+
+- name: RabbitMQ 集群 - 非种子节点加入集群
+  hosts: rabbitmq
+  gather_facts: false
+  serial: 1
+  tags: rabbitmq, rabbitmq-cluster
+
+  tasks:
+    - name: 非种子节点 - 检查并加入集群
+      when: inventory_hostname != rabbitmq_seed_node_ip
+      block:
+        - name: 启动非种子节点 RabbitMQ 服务
+          ansible.builtin.systemd:
+            name: rabbitmq-server
+            state: started
+            enabled: true
+            daemon_reload: true
+          become: true
+
+        - name: 检查当前集群是否已含种子节点
+          ansible.builtin.shell:
+            cmd: >
+              rabbitmqctl cluster_status 2>/dev/null |
+              grep -c "{{ rabbitmq_seed_hostname }}" || true
+          register: cluster_check
+          changed_when: false
+          become: true
+
+        - name: 加入集群（若尚未加入）
+          when: cluster_check.stdout | int == 0
+          block:
+            - name: 停止 App
+              ansible.builtin.command: rabbitmqctl stop_app
+              become: true
+
+            - name: 重置节点
+              ansible.builtin.command: rabbitmqctl reset
+              become: true
+
+            - name: 加入种子节点
+              ansible.builtin.command: >
+                rabbitmqctl join_cluster rabbit@{{ rabbitmq_seed_hostname }}
+              become: true
+
+            - name: 启动 App
+              ansible.builtin.command: rabbitmqctl start_app
+              become: true
+
+        - name: 验证集群成员数（应 >= 2）
+          ansible.builtin.shell:
+            cmd: >
+              rabbitmqctl cluster_status 2>/dev/null |
+              grep -c "{{ rabbitmq_node_prefix }}" || true
+          register: cluster_members
+          changed_when: false
+          failed_when: cluster_members.stdout | int < 2
+          become: true
+
+
+- name: RabbitMQ 集群 - Management Plugin 和账号管理
+  hosts: rabbitmq
+  gather_facts: false
+  tags: rabbitmq, rabbitmq-admin
+
+  tasks:
+    - name: 种子节点 - Management Plugin 和账号管理
+      when: inventory_hostname == rabbitmq_seed_node_ip
+      block:
+        - name: 启用 Management Plugin
+          ansible.builtin.command: rabbitmq-plugins enable rabbitmq_management
+          register: plugin_result
+          changed_when: "'already enabled' not in plugin_result.stdout"
+          become: true
+
+        - name: 检查 guest 用户是否存在
+          ansible.builtin.shell:
+            cmd: >
+              rabbitmqctl list_users 2>/dev/null |
+              grep -c '^guest' || true
+          register: guest_check
+          changed_when: false
+          become: true
+
+        - name: 删除默认 guest 账号
+          ansible.builtin.command: rabbitmqctl delete_user guest
+          when: guest_check.stdout | int > 0
+          become: true
+
+        - name: 检查 admin 用户是否已存在
+          ansible.builtin.shell:
+            cmd: >
+              rabbitmqctl list_users 2>/dev/null |
+              grep -c "^{{ rabbitmq_admin_user }}" || true
+          register: admin_check
+          changed_when: false
+          become: true
+
+        - name: 创建管理员账号（若不存在）
+          when: admin_check.stdout | int == 0
+          block:
+            - name: 添加 admin 用户
+              ansible.builtin.command: >
+                rabbitmqctl add_user {{ rabbitmq_admin_user }} {{ rabbitmq_admin_password }}
+              become: true
+
+            - name: 设置 administrator 标签
+              ansible.builtin.command: >
+                rabbitmqctl set_user_tags {{ rabbitmq_admin_user }} administrator
+              become: true
+
+            - name: 授予 / vhost 全权限
+              ansible.builtin.command: >
+                rabbitmqctl set_permissions -p /
+                {{ rabbitmq_admin_user }} ".*" ".*" ".*"
+              become: true

@@ -1,0 +1,224 @@
+---
+# ============================================================
+# mysql/03_replication.yml  —  MySQL GTID 主从复制配置
+# ============================================================
+# 目的：
+#   1. 在 Primary 上关闭 read_only，创建复制账号 repl
+#   2. 在 Replica 上配置 CHANGE REPLICATION SOURCE（GTID 模式）
+#   3. 启动复制线程，验证 IO/SQL Running=Yes
+# ============================================================
+
+- name: MySQL 复制 - Primary 创建复制账号
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-replication
+
+  tasks:
+    - name: Primary - 关闭 read_only（Primary 无需只读）
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -e "SET GLOBAL read_only=OFF; SET GLOBAL super_read_only=OFF;"
+      changed_when: false
+      become: true
+      no_log: true
+      when: inventory_hostname == mysql_primary_ip
+      run_once: true
+
+    - name: 检查 repl 账号是否已存在
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -e "SELECT COUNT(*) FROM mysql.user WHERE User='{{ mysql_repl_user }}';"
+          | tail -1
+      register: repl_user_check
+      changed_when: false
+      become: true
+      no_log: true
+      when: inventory_hostname == mysql_primary_ip
+      run_once: true
+
+    - name: 创建复制账号（若不存在）
+      when:
+        - inventory_hostname == mysql_primary_ip
+        - repl_user_check.stdout | trim | int == 0
+      run_once: true
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -e "
+            CREATE USER '{{ mysql_repl_user }}'@'%'
+            IDENTIFIED WITH caching_sha2_password
+            BY '{{ mysql_repl_password }}';
+            GRANT REPLICATION SLAVE ON *.* TO '{{ mysql_repl_user }}'@'%';
+            FLUSH PRIVILEGES;
+          "
+      become: true
+      no_log: true
+
+    - name: 检查 root@'%' 远程管理账号是否已存在
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -e "SELECT COUNT(*) FROM mysql.user WHERE User='root' AND Host='%';"
+          | tail -1
+      register: root_remote_check
+      changed_when: false
+      become: true
+      no_log: true
+      when: inventory_hostname == mysql_primary_ip
+      run_once: true
+
+    - name: 创建 root@'%' 远程管理账号（若不存在）
+      when:
+        - inventory_hostname == mysql_primary_ip
+        - root_remote_check.stdout | trim | int == 0
+      run_once: true
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -e "
+            CREATE USER 'root'@'%'
+            IDENTIFIED WITH caching_sha2_password
+            BY '{{ mysql_root_password }}';
+            GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+            FLUSH PRIVILEGES;
+          "
+      become: true
+      no_log: true
+
+    - name: 显示 Primary GTID 已执行集合
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -NBe "SELECT @@gtid_executed;"
+      register: master_status
+      changed_when: false
+      become: true
+      no_log: false
+      when: inventory_hostname == mysql_primary_ip
+      run_once: true
+
+    - name: 输出 Master 状态
+      ansible.builtin.debug:
+        msg: "{{ master_status.stdout_lines }}"
+      when: inventory_hostname == mysql_primary_ip
+      run_once: true
+
+
+- name: MySQL 复制 - Replica 配置 CHANGE REPLICATION SOURCE
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-replication
+
+  tasks:
+    - name: Replica 节点 - 配置并启动 GTID 复制
+      when: inventory_hostname != mysql_primary_ip
+      block:
+        - name: 检查复制线程是否已运行
+          ansible.builtin.shell:
+            cmd: >
+              {{ mysql_client_bin }}
+              --socket=/tmp/mysql.sock
+              -u root
+              -p"{{ mysql_root_password }}"
+              -e "SHOW REPLICA STATUS\G"
+              | grep -c "Replica_IO_Running: Yes" || true
+          register: repl_running
+          changed_when: false
+          become: true
+          no_log: true
+
+        - name: 配置 CHANGE REPLICATION SOURCE（若未启动）
+          when: repl_running.stdout | trim | int == 0
+          ansible.builtin.shell:
+            cmd: >
+              {{ mysql_client_bin }}
+              --socket=/tmp/mysql.sock
+              -u root
+              -p"{{ mysql_root_password }}"
+              -e "
+                STOP REPLICA;
+                RESET REPLICA ALL;
+                CHANGE REPLICATION SOURCE TO
+                  SOURCE_HOST='{{ mysql_primary_ip }}',
+                  SOURCE_PORT={{ mysql_port }},
+                  SOURCE_USER='{{ mysql_repl_user }}',
+                  SOURCE_PASSWORD='{{ mysql_repl_password }}',
+                  GET_SOURCE_PUBLIC_KEY=1,
+                  SOURCE_AUTO_POSITION=1;
+                START REPLICA;
+              "
+          become: true
+          no_log: true
+
+        - name: 确保 Replica 设为只读
+          ansible.builtin.shell:
+            cmd: >
+              {{ mysql_client_bin }}
+              --socket=/tmp/mysql.sock
+              -u root
+              -p"{{ mysql_root_password }}"
+              -e "SET GLOBAL read_only=ON;"
+          changed_when: false
+          become: true
+          no_log: true
+
+        - name: 等待复制同步（10 秒）
+          ansible.builtin.wait_for:
+            timeout: 10
+          delegate_to: localhost
+
+        - name: 验证 IO Thread Running = Yes
+          ansible.builtin.shell:
+            cmd: >
+              {{ mysql_client_bin }}
+              --socket=/tmp/mysql.sock
+              -u root
+              -p"{{ mysql_root_password }}"
+              -e "SHOW REPLICA STATUS\G"
+              | grep "Replica_IO_Running" | awk '{print $2}'
+          register: io_running
+          changed_when: false
+          failed_when: io_running.stdout | trim != "Yes"
+          become: true
+          no_log: true
+
+        - name: 验证 SQL Thread Running = Yes
+          ansible.builtin.shell:
+            cmd: >
+              {{ mysql_client_bin }}
+              --socket=/tmp/mysql.sock
+              -u root
+              -p"{{ mysql_root_password }}"
+              -e "SHOW REPLICA STATUS\G"
+              | grep "Replica_SQL_Running:" | head -1 | awk '{print $2}'
+          register: sql_running
+          changed_when: false
+          failed_when: sql_running.stdout | trim != "Yes"
+          become: true
+          no_log: true
+
+        - name: 显示 Replica 复制状态
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }}: IO={{ io_running.stdout | trim }},
+              SQL={{ sql_running.stdout | trim }} ✅

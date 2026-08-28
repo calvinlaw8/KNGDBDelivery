@@ -1,0 +1,49 @@
+# ============================================================
+# group_vars/mysql.yml  —  MySQL GTID 主从 + Keepalived 变量
+# ============================================================
+
+mysql_version: "8.4.11"
+mysql_port: 3306
+
+# 安装路径
+mysql_base_dir: "/opt/mysql"
+mysql_data_dir: "/data/mysql"
+mysql_log_dir: "/var/log/mysql"
+mysql_config_file: "/etc/mysql/my.cnf"
+mysql_pkg_dir: "/home/sysadmin/pkg/mysql"
+mysql_server_package: "mysql-community-server"
+mysql_client_bin: "/usr/bin/mysql"
+mysql_server_bin: "/usr/sbin/mysqld"
+mysql_service_name: "mysql"
+
+# 节点拓扑
+mysql_nodes:
+  - ip: "10.20.14.50"
+    hostname: "T-MySQL-01"
+    server_id: 1
+    role: "primary"
+    keepalived_priority: 100
+  - ip: "10.20.14.51"
+    hostname: "T-MySQL-02"
+    server_id: 2
+    role: "replica"
+    keepalived_priority: 90
+  - ip: "10.20.14.52"
+    hostname: "T-MySQL-03"
+    server_id: 3
+    role: "replica"
+    keepalived_priority: 80
+
+# 账号
+mysql_root_password: "CHANGE_ME"
+mysql_repl_user: "repl"
+mysql_repl_password: "CHANGE_ME"
+
+# Keepalived VIP 配置
+# 测试环境历史验收使用的未绑定节点地址（10.20.14.50~52 为实体节点）
+mysql_vip: "10.20.14.59"
+# 使用 auto 时由每台 MySQL 节点根据默认路由自动识别实际网卡。
+keepalived_interface: "auto"
+keepalived_router_id: 61
+keepalived_auth_pass: "CHANGE_ME"
+

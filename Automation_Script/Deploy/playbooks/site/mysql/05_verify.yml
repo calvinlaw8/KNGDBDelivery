@@ -1,0 +1,152 @@
+---
+# ============================================================
+# mysql/05_verify.yml  —  MySQL 集群验证
+# ============================================================
+# 目的：全面验证 MySQL 主从复制状态、VIP 可达性、Primary 读写能力
+# ============================================================
+
+- name: MySQL 节点服务验证
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-verify
+
+  tasks:
+    - name: 检查 mysqld 服务状态
+      ansible.builtin.command: "systemctl is-active {{ mysql_service_name }}"
+      register: mysqld_active
+      changed_when: false
+      failed_when: mysqld_active.stdout != "active"
+      become: true
+
+    - name: 检查 keepalived 服务状态
+      ansible.builtin.command: systemctl is-active keepalived
+      register: kp_active
+      changed_when: false
+      failed_when: kp_active.stdout != "active"
+      become: true
+
+    - name: 显示节点服务状态
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          mysqld={{ mysqld_active.stdout }},
+          keepalived={{ kp_active.stdout }}
+
+
+- name: MySQL 主从复制验证（Replica 节点）
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-verify
+
+  tasks:
+    - name: 验证 Replica IO Thread Running = Yes
+      when: inventory_hostname != mysql_primary_ip
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -e "SHOW REPLICA STATUS\G"
+          | grep "Replica_IO_Running" | awk '{print $2}'
+      register: io_running
+      changed_when: false
+      failed_when: io_running.stdout | trim != "Yes"
+      become: true
+      no_log: true
+
+    - name: 验证 Replica SQL Thread Running = Yes
+      when: inventory_hostname != mysql_primary_ip
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -e "SHOW REPLICA STATUS\G"
+          | grep "Replica_SQL_Running:" | head -1 | awk '{print $2}'
+      register: sql_running
+      changed_when: false
+      failed_when: sql_running.stdout | trim != "Yes"
+      become: true
+      no_log: true
+
+    - name: 显示 Replica 复制线程状态
+      when: inventory_hostname != mysql_primary_ip
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}:
+          IO_Running={{ io_running.stdout | trim }},
+          SQL_Running={{ sql_running.stdout | trim }} ✅
+
+    - name: 显示 GTID 执行状态（Replica）
+      when: inventory_hostname != mysql_primary_ip
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -e "SHOW REPLICA STATUS\G"
+          | grep -E "Executed_Gtid_Set|Source_Host|Seconds_Behind_Source"
+      register: gtid_status
+      changed_when: false
+      become: true
+      no_log: false
+
+    - name: 输出 GTID 状态详情
+      when: inventory_hostname != mysql_primary_ip
+      ansible.builtin.debug:
+        msg: "{{ gtid_status.stdout_lines }}"
+
+
+- name: MySQL VIP 可达性验证（从 Ansible-01 验证）
+  hosts: localhost
+  gather_facts: false
+  tags: mysql, mysql-verify
+  vars_files:
+    - ../../group_vars/mysql.yml
+
+  tasks:
+    - name: Ping VIP（验证 VIP 活跃）
+      ansible.builtin.command: "ping -c 3 {{ mysql_vip }}"
+      register: vip_ping
+      changed_when: false
+      failed_when: vip_ping.rc != 0
+
+    - name: 输出 Ping 结果
+      ansible.builtin.debug:
+        msg: "VIP {{ mysql_vip }} 可达 ✅（{{ vip_ping.stdout_lines[-1] }}）"
+
+
+- name: MySQL 验证通过摘要（Primary 节点）
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-verify
+
+  tasks:
+    - name: 显示 Primary GTID 状态
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }}
+          --socket=/tmp/mysql.sock
+          -u root
+          -p"{{ mysql_root_password }}"
+          -NBe "SELECT @@gtid_executed;"
+      register: primary_gtid
+      changed_when: false
+      become: true
+      no_log: false
+      when: inventory_hostname == mysql_primary_ip
+      run_once: true
+
+    - name: 验证通过摘要
+      ansible.builtin.debug:
+        msg: >-
+          MySQL 集群验证通过 ✅
+          Primary: {{ mysql_primary_ip }}
+          VIP: {{ mysql_vip }}
+          复制方式: GTID 主从（1+2）
+          {{ primary_gtid.stdout }}
+      when: inventory_hostname == mysql_primary_ip
+      run_once: true

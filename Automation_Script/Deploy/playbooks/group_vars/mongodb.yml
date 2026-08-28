@@ -1,0 +1,30 @@
+# ============================================================
+# group_vars/mongodb.yml  —  MongoDB 集群变量
+# ============================================================
+
+mongodb_version: "8.2.12"
+
+# 离线包
+mongodb_pkg_dir: "/home/sysadmin/pkg/mongodb"
+mongodb_server_package: "mongodb-org-server"
+
+# 安装目录
+mongodb_base_dir: "/opt/mongodb"
+
+# 数据 / 日志 / 配置
+mongodb_data_dir: "/data/mongodb"
+mongodb_log_dir: "/var/log/mongodb"
+mongodb_config_file: "/etc/mongod.conf"
+
+# 网络
+mongodb_port: 27017
+
+# 副本集名称
+mongodb_replicaset: "rs0"
+# mongodb_primary_ip 和 mongodb_replica_ips 定义在 group_vars/all.yml
+# （因 hosts: 字段在 parse 阶段求值，必须来自 all 组）
+
+# 认证
+mongodb_admin_user: "admin"
+mongodb_admin_password: "CHANGE_ME"
+mongodb_keyfile: "/etc/mongodb-keyfile"

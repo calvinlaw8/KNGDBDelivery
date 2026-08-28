@@ -1,0 +1,30 @@
+# ============================================================
+# group_vars/all.yml  —  全局变量
+# ============================================================
+
+# Ansible-01 暂存目录（离线包 SCP 上传后的落地路径）
+staging_dir: "/home/sysadmin/pkg"
+
+# 各组件离线包子目录
+redis_pkg_dir:    "{{ staging_dir }}/redis"
+rabbitmq_pkg_dir: "{{ staging_dir }}/rabbitmq"
+mongodb_pkg_dir:  "{{ staging_dir }}/mongodb"
+mysql_pkg_dir:    "{{ staging_dir }}/mysql"
+
+# 交付五只支持此操作系统与架构基线；不满足时前置检查必须终止部署。
+required_os_distribution: "Ubuntu"
+required_os_major_version: "24"
+required_architecture: "x86_64"
+
+# MongoDB 副本集拓扑（hosts: 字段在 parse 阶段求值，需放在 all.yml）
+mongodb_primary_ip: "10.20.14.47"
+mongodb_replica_ips:
+  - "10.20.14.48"
+  - "10.20.14.49"
+
+# MySQL 主节点 IP（hosts: 字段在 parse 阶段求值，需放在 all.yml）
+mysql_primary_ip: "10.20.14.50"
+
+# 注意：主机 IP→主机名映射由 init_ansible.sh（config.env）定义，
+# 写入 Ansible-01 的 /etc/hosts（# BEGIN DB_CLUSTER_HOSTS … # END DB_CLUSTER_HOSTS）
+# 01_server_init.yml 运行时从该文件动态读取，无需在此硬编码。

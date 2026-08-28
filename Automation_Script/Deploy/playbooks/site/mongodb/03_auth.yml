@@ -1,0 +1,217 @@
+---
+# ============================================================
+# mongodb/03_auth.yml  —  MongoDB 认证启用（keyFile + admin）
+# ============================================================
+# 目的：
+#   1. 在 Primary 节点创建 admin 账号（无认证连接阶段）
+#   2. 在 Ansible-01 控制节点生成 keyFile（openssl rand -base64 756）
+#   3. 分发 keyFile 至 3 节点（mode=0400，owner=mongodb:mongodb）
+#   4. 更新 mongod.conf（启用 authorization + keyFile）
+#   5. 重启所有节点 mongod，验证认证配置生效
+# ============================================================
+
+- name: MongoDB 认证 - 创建 admin 账号（Primary 无认证阶段）
+  hosts: mongodb
+  gather_facts: false
+  tags: mongodb, mongodb-auth
+
+  tasks:
+    - name: 检查 admin 用户是否已存在
+      ansible.builtin.command:
+        cmd: >
+          mongosh admin --port {{ mongodb_port }} --quiet --norc
+          --eval "db.getUser('{{ mongodb_admin_user }}') != null ? 'exists' : 'not_found'"
+      register: admin_check
+      changed_when: false
+      failed_when: false
+      become: false
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
+    - name: 创建 admin 账号（若不存在）
+      when:
+        - inventory_hostname == mongodb_primary_ip
+        - "'exists' not in admin_check.stdout"
+      run_once: true
+      ansible.builtin.command:
+        cmd: >
+          mongosh admin --port {{ mongodb_port }} --quiet --norc
+          --eval "
+            db.createUser({
+              user: '{{ mongodb_admin_user }}',
+              pwd: '{{ mongodb_admin_password }}',
+              roles: [{role: 'root', db: 'admin'}]
+            })
+          "
+      become: false
+
+    - name: 验证 admin 账号创建成功
+      ansible.builtin.command:
+        cmd: >
+          mongosh admin --port {{ mongodb_port }} --quiet --norc
+          --eval "db.getUser('{{ mongodb_admin_user }}') != null ? 'exists' : 'not_found'"
+      register: admin_verify
+      changed_when: false
+      failed_when: "'exists' not in admin_verify.stdout"
+      become: false
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
+
+- name: MongoDB 认证 - 生成 keyFile（Ansible 控制节点）
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tags: mongodb, mongodb-keyfile
+
+  tasks:
+    - name: 创建临时 keyFile 目录
+      ansible.builtin.file:
+        path: /tmp/mongodb_auth
+        state: directory
+        mode: "0700"
+
+    - name: 检查 keyFile 是否已生成
+      ansible.builtin.stat:
+        path: /tmp/mongodb_auth/mongodb.keyfile
+      register: keyfile_stat
+
+    - name: 生成 keyFile（openssl rand -base64 756）
+      ansible.builtin.shell:
+        cmd: >
+          openssl rand -base64 756 > /tmp/mongodb_auth/mongodb.keyfile
+      when: not keyfile_stat.stat.exists
+
+
+- name: MongoDB 认证 - 分发 keyFile 至各节点
+  hosts: mongodb
+  gather_facts: false
+  tags: mongodb, mongodb-keyfile
+
+  tasks:
+    - name: 分发 keyFile（mode=0400，owner=mongodb:mongodb）
+      ansible.builtin.copy:
+        src: /tmp/mongodb_auth/mongodb.keyfile
+        dest: "{{ mongodb_keyfile }}"
+        owner: mongodb
+        group: mongodb
+        mode: "0400"
+      become: true
+
+    - name: 验证 keyFile 权限
+      ansible.builtin.stat:
+        path: "{{ mongodb_keyfile }}"
+      register: keyfile_remote
+
+    - name: 断言 keyFile 权限正确（mode=0400，owner=mongodb）
+      ansible.builtin.assert:
+        that:
+          - keyfile_remote.stat.exists
+          - keyfile_remote.stat.mode == "0400"
+          - keyfile_remote.stat.pw_name == "mongodb"
+          - keyfile_remote.stat.gr_name == "mongodb"
+        fail_msg: >
+          keyFile 权限错误！
+          当前: mode={{ keyfile_remote.stat.mode }},
+          owner={{ keyfile_remote.stat.pw_name }}:{{ keyfile_remote.stat.gr_name }}
+          要求: mode=0400, owner=mongodb:mongodb
+
+
+- name: MongoDB 认证 - 更新 mongod.conf 并重启（启用认证）
+  hosts: mongodb
+  gather_facts: false
+  tags: mongodb, mongodb-auth
+
+  tasks:
+    - name: 更新 mongod.conf（启用 authorization + keyFile）
+      ansible.builtin.copy:
+        dest: "{{ mongodb_config_file }}"
+        content: |
+          # mongod.conf - 认证模式
+          storage:
+            dbPath: {{ mongodb_data_dir }}
+
+          systemLog:
+            destination: file
+            logAppend: true
+            path: {{ mongodb_log_dir }}/mongod.log
+
+          net:
+            port: {{ mongodb_port }}
+            bindIp: 0.0.0.0
+
+          processManagement:
+            timeZoneInfo: /usr/share/zoneinfo
+
+          replication:
+            replSetName: "{{ mongodb_replicaset }}"
+
+          security:
+            authorization: enabled
+            keyFile: {{ mongodb_keyfile }}
+        owner: mongodb
+        group: mongodb
+        mode: "0640"
+      become: true
+      notify: restart mongod
+
+    - name: 触发配置更新通知
+      ansible.builtin.meta: flush_handlers
+
+    - name: 等待 mongod 重启后恢复（30 秒）
+      ansible.builtin.wait_for:
+        port: "{{ mongodb_port }}"
+        host: "{{ inventory_hostname }}"
+        timeout: 30
+      delegate_to: localhost
+
+    - name: 验证 mongod 服务状态（认证模式）
+      ansible.builtin.command: systemctl is-active mongod
+      register: mongod_active_auth
+      changed_when: false
+      failed_when: mongod_active_auth.stdout != "active"
+      become: true
+
+  handlers:
+    - name: restart mongod
+      ansible.builtin.systemd:
+        name: mongod
+        state: restarted
+        daemon_reload: true
+      become: true
+
+
+- name: MongoDB 认证 - 验证认证配置生效（Primary 节点）
+  hosts: mongodb
+  gather_facts: false
+  tags: mongodb, mongodb-auth
+
+  tasks:
+    - name: 等待副本集选主完成（20 秒）
+      ansible.builtin.wait_for:
+        timeout: 20
+      delegate_to: localhost
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
+    - name: 使用认证连接验证 rs.status().ok = 1
+      ansible.builtin.command:
+        cmd: >
+          mongosh admin --port {{ mongodb_port }} --quiet --norc
+          -u {{ mongodb_admin_user }}
+          -p {{ mongodb_admin_password }}
+          --eval "rs.status().ok"
+      register: rs_ok
+      changed_when: false
+      failed_when: rs_ok.stdout | trim != '1'
+      become: false
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
+    - name: 认证配置验证摘要
+      ansible.builtin.debug:
+        msg: >-
+          MongoDB 认证配置完成 ✅
+          rs.status().ok = {{ rs_ok.stdout | trim }}
+          keyFile: {{ mongodb_keyfile }}（mode=0400，owner=mongodb:mongodb）
+          管理员: {{ mongodb_admin_user }} 已创建

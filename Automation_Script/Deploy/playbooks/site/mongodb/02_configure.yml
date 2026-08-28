@@ -1,0 +1,178 @@
+---
+# ============================================================
+# mongodb/02_configure.yml  —  MongoDB 配置副本集（无认证阶段）
+# ============================================================
+# 目的：
+#   1. 写入 mongod.conf（无认证，启用 replSetName=rs0）
+#   2. 重置 systemd StartLimitBurst，启动 mongod
+#   3. 在初始 Primary 节点执行 rs.initiate() 初始化副本集
+# ============================================================
+
+- name: MongoDB 配置 - mongod.conf（无认证）+ 启动
+  hosts: mongodb
+  gather_facts: false
+  tags: mongodb, mongodb-configure
+
+  tasks:
+    - name: 创建 MongoDB 数据和日志目录
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: mongodb
+        group: mongodb
+        mode: "0750"
+      loop:
+        - { path: "{{ mongodb_data_dir }}" }
+        - { path: "{{ mongodb_log_dir }}" }
+      become: true
+
+    - name: 写入 mongod.conf（无认证模式，含 replSet 配置）
+      ansible.builtin.copy:
+        dest: "{{ mongodb_config_file }}"
+        content: |
+          # mongod.conf - 初始配置（无认证，认证在 03_auth.yml 中启用）
+          storage:
+            dbPath: {{ mongodb_data_dir }}
+
+          systemLog:
+            destination: file
+            logAppend: true
+            path: {{ mongodb_log_dir }}/mongod.log
+
+          net:
+            port: {{ mongodb_port }}
+            bindIp: 0.0.0.0
+
+          processManagement:
+            timeZoneInfo: /usr/share/zoneinfo
+
+          replication:
+            replSetName: "{{ mongodb_replicaset }}"
+        owner: mongodb
+        group: mongodb
+        mode: "0640"
+      become: true
+      notify: restart mongod
+
+    - name: 重置 StartLimitBurst 状态（防重试限流）
+      ansible.builtin.command: systemctl reset-failed mongod
+      register: reset_failed_result
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: 启动 mongod 并设为开机自启
+      ansible.builtin.systemd:
+        name: mongod
+        state: started
+        enabled: true
+        daemon_reload: true
+      become: true
+
+    - name: 等待 mongod 监听端口（最多 60 秒）
+      ansible.builtin.wait_for:
+        port: "{{ mongodb_port }}"
+        host: "{{ inventory_hostname }}"
+        timeout: 60
+      delegate_to: localhost
+
+    - name: 验证 mongod 服务状态
+      ansible.builtin.command: systemctl is-active mongod
+      register: mongod_active
+      changed_when: false
+      failed_when: mongod_active.stdout != "active"
+      become: true
+
+  handlers:
+    - name: restart mongod
+      ansible.builtin.systemd:
+        name: mongod
+        state: restarted
+        daemon_reload: true
+      become: true
+
+
+- name: MongoDB 副本集初始化（Primary 节点执行）
+  hosts: mongodb
+  gather_facts: false
+  tags: mongodb, mongodb-replicaset
+
+  tasks:
+    - name: 等待 Primary mongod 端口就绪（handler restart 后）
+      ansible.builtin.wait_for:
+        port: "{{ mongodb_port }}"
+        host: "{{ mongodb_primary_ip }}"
+        timeout: 60
+      delegate_to: localhost
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
+    - name: 检查副本集是否已初始化
+      ansible.builtin.command:
+        cmd: >
+          mongosh --port {{ mongodb_port }} --quiet
+          --eval "rs.status().ok"
+          --norc
+      register: rs_status
+      changed_when: false
+      failed_when: false
+      become: false
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
+    - name: 执行 rs.initiate()（若尚未初始化）
+      when:
+        - inventory_hostname == mongodb_primary_ip
+        - rs_status.stdout | default('0') | trim != '1'
+      run_once: true
+      ansible.builtin.shell:
+        cmd: >
+          mongosh --port {{ mongodb_port }} --quiet --norc --eval "
+            rs.initiate({
+              _id: '{{ mongodb_replicaset }}',
+              members: [
+                {_id: 0, host: '{{ mongodb_primary_ip }}:{{ mongodb_port }}'},
+                {_id: 1, host: '{{ mongodb_replica_ips[0] }}:{{ mongodb_port }}'},
+                {_id: 2, host: '{{ mongodb_replica_ips[1] }}:{{ mongodb_port }}'}
+              ]
+            })
+          "
+      register: rs_initiate_result
+      failed_when:
+        - rs_initiate_result.rc != 0
+        - "'already initialized' not in rs_initiate_result.stderr"
+      become: false
+
+    - name: 输出初始化结果
+      ansible.builtin.debug:
+        msg: "{{ rs_initiate_result.stdout_lines | default(['rs.initiate() 已跳过（副本集已存在）']) }}"
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
+    - name: 等待 Primary 选主完成（60 秒）
+      ansible.builtin.wait_for:
+        timeout: 60
+      delegate_to: localhost
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
+    - name: 验证副本集成员数量
+      ansible.builtin.command:
+        cmd: >
+          mongosh --port {{ mongodb_port }} --quiet --norc
+          --eval "rs.status().members.length"
+      register: rs_members_count
+      changed_when: false
+      failed_when: rs_members_count.stdout | trim | int < 3
+      become: false
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
+    - name: 副本集初始化结果摘要
+      ansible.builtin.debug:
+        msg: >-
+          副本集 {{ mongodb_replicaset }} 就绪 ✅
+          成员数: {{ rs_members_count.stdout | trim }}
+          Primary: {{ mongodb_primary_ip }}:{{ mongodb_port }}
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true

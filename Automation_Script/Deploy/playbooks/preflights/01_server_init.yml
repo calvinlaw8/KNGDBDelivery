@@ -1,0 +1,79 @@
+---
+# ============================================================
+# 01_server_init.yml  —  DB 服务器初始化：写入 /etc/hosts
+# ============================================================
+# 目的：
+#   将 12 台 DB 服务器的 IP→主机名 映射写入每台节点的 /etc/hosts
+#   使节点间能通过主机名互相解析（RabbitMQ join / MongoDB rs / MySQL report_host）
+#
+# 数据来源：
+#   init_ansible.sh Step 6b 已将 config.env 中定义的 IP→主机名 写入
+#   Ansible-01 自身的 /etc/hosts，格式如下：
+#     # BEGIN DB_CLUSTER_HOSTS
+#     <NODE_IP_1>       <NODE_HOSTNAME_1>
+#     ...
+#     # END DB_CLUSTER_HOSTS
+#   本 Playbook 从 Ansible-01 的 /etc/hosts 动态读取这段内容，
+#   再通过 blockinfile 推送到 12 台 DB 节点，不做任何硬编码。
+#
+# 执行方式（在 Ansible-01 上）：
+#   ansible-playbook 01_server_init.yml
+#   （inventory 由 init Step 7 写入 /etc/ansible/hosts，ansible.cfg 已设默认值）
+# ============================================================
+
+# ── Play 1：在 Ansible-01 上读取 /etc/hosts 中的 DB 集群条目 ──
+- name: 从 Ansible-01 /etc/hosts 提取 DB 主机映射
+  hosts: localhost
+  gather_facts: false
+  tags: server-init
+
+  tasks:
+    - name: 提取 BEGIN…END 之间的主机条目
+      ansible.builtin.shell: |
+        sed -n '/^# BEGIN DB_CLUSTER_HOSTS$/,/^# END DB_CLUSTER_HOSTS$/{
+          /^# BEGIN DB_CLUSTER_HOSTS$/d
+          /^# END DB_CLUSTER_HOSTS$/d
+          p
+        }' /etc/hosts
+      register: db_hosts_raw
+      changed_when: false
+
+    - name: 断言提取到内容（init_ansible.sh 必须已执行完毕）
+      ansible.builtin.assert:
+        that: db_hosts_raw.stdout | length > 0
+        fail_msg: >-
+          /etc/hosts 中未找到 DB 集群主机条目（# BEGIN DB_CLUSTER_HOSTS … # END DB_CLUSTER_HOSTS）。
+          请先执行 init_ansible.sh 完成 Step 6b，再运行本 Playbook。
+
+    - name: 将提取结果存为全局 fact
+      ansible.builtin.set_fact:
+        db_hosts_block: "{{ db_hosts_raw.stdout }}"
+
+# ── Play 2：将主机条目推送到 12 台 DB 节点 ──────────────────
+- name: 写入 /etc/hosts 到所有 DB 节点
+  hosts: db_all
+  gather_facts: false
+  tags: server-init
+
+  tasks:
+    - name: 从 localhost 获取 db_hosts_block
+      ansible.builtin.set_fact:
+        db_hosts_block: "{{ hostvars['localhost']['db_hosts_block'] }}"
+
+    - name: 写入 DB 集群主机名解析（blockinfile，幂等）
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} 数据库集群主机"
+        block: "{{ db_hosts_block }}"
+      become: true
+
+    - name: 验证主机名解析（以第一行 IP 为例）
+      ansible.builtin.command: >
+        getent hosts {{ db_hosts_block.split('\n')[0].split()[1] }}
+      register: hosts_check
+      changed_when: false
+      failed_when: hosts_check.rc != 0
+
+    - name: 显示解析结果
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} → /etc/hosts 解析正常: {{ hosts_check.stdout }}"

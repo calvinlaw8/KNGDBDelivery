@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# 现场配置和敏感凭据
+**/config.env
+**/mongodb.keyfile
+账号密码*.xlsx
+
+# 本地 Ansible / Python 运行产物
+.venv/
+__pycache__/
+*.retry
+
+# 临时文件和压缩包
+.tmp-*/
+*.zip
+*.7z
+*.tar.gz
+
+# 文档导出文件
+*.pdf

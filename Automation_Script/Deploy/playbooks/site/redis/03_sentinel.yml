@@ -1,0 +1,97 @@
+---
+# ============================================================
+# redis/03_sentinel.yml  —  Redis Sentinel 高可用部署
+# ============================================================
+# 目的：在 3 台节点部署 Redis Sentinel，实现 HA 自动切换
+# 关键参数：
+#   - daemonize no（配合 systemd Type=simple）
+#   - sentinel monitor quorum=2（3 个 Sentinel 中 2 个同意才切换）
+#   - down-after-milliseconds=30000（30 秒无响应判为故障）
+# ============================================================
+
+- name: Redis Sentinel 部署
+  hosts: redis
+  gather_facts: true
+  tags: redis, redis-sentinel
+
+  tasks:
+    - name: 确保 /var/log/redis 目录存在
+      ansible.builtin.file:
+        path: /var/log/redis
+        state: directory
+        owner: redis
+        group: redis
+        mode: "0750"
+      become: true
+
+    - name: 写入 sentinel.conf
+      ansible.builtin.copy:
+        dest: /etc/redis/sentinel.conf
+        content: |
+          port {{ sentinel_port }}
+          daemonize no
+          logfile /var/log/redis/redis-sentinel.log
+          dir /var/lib/redis
+          sentinel monitor {{ sentinel_master_name }} {{ redis_master_ip }} {{ redis_port }} {{ sentinel_quorum }}
+          sentinel auth-pass {{ sentinel_master_name }} {{ redis_password }}
+          sentinel down-after-milliseconds {{ sentinel_master_name }} {{ sentinel_down_after_ms }}
+          sentinel failover-timeout {{ sentinel_master_name }} {{ sentinel_failover_timeout }}
+          sentinel parallel-syncs {{ sentinel_master_name }} {{ sentinel_parallel_syncs }}
+        owner: redis
+        group: redis
+        mode: "0640"
+      become: true
+      notify: restart redis-sentinel
+
+    - name: 部署 redis-sentinel.service（Type=simple，daemonize no）
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/redis-sentinel.service
+        content: |
+          [Unit]
+          Description=Redis Sentinel
+          After=network.target redis-server.service
+
+          [Service]
+          Type=simple
+          User=redis
+          Group=redis
+          ExecStart=/usr/bin/redis-sentinel /etc/redis/sentinel.conf
+          Restart=on-failure
+          RestartSec=5s
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart redis-sentinel
+
+    - name: 检查 /usr/bin/redis-sentinel 是否存在（dpkg 安装路径）
+      ansible.builtin.stat:
+        path: /usr/bin/redis-sentinel
+      register: sentinel_bin
+
+    - name: 若不存在则创建软链接（dpkg 有时只装 redis-server）
+      ansible.builtin.file:
+        src: /usr/bin/redis-server
+        dest: /usr/bin/redis-sentinel
+        state: link
+      when: not sentinel_bin.stat.exists
+      become: true
+
+    - name: 启动 redis-sentinel 并设为开机自启
+      ansible.builtin.systemd:
+        name: redis-sentinel
+        state: started
+        enabled: true
+        daemon_reload: true
+      become: true
+
+  handlers:
+    - name: restart redis-sentinel
+      ansible.builtin.systemd:
+        name: redis-sentinel
+        state: restarted
+        daemon_reload: true
+      become: true

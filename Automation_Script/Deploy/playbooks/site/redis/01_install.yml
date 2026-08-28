@@ -1,0 +1,52 @@
+---
+# ============================================================
+# redis/01_install.yml  —  Redis 8.2.8 离线安装
+# ============================================================
+# 目的：将 Redis 8.2.8 目标包分发到 3 台 Redis 节点并离线安装
+# 离线包路径（Ansible-01）：{{ redis_pkg_dir }}/*.deb
+# ============================================================
+
+- name: Redis 安装 - 分发离线包并按序安装
+  hosts: redis
+  gather_facts: true
+  tags: redis, redis-install
+
+  tasks:
+    - name: 清理旧 Redis 离线包暂存目录
+      ansible.builtin.file:
+        path: /tmp/redis
+        state: absent
+      become: true
+
+    - name: 创建目标暂存目录
+      ansible.builtin.file:
+        path: /tmp/redis
+        state: directory
+        mode: "0755"
+      become: true
+
+    - name: 分发所有 .deb 包至各节点
+      ansible.builtin.copy:
+        src: "{{ redis_pkg_dir }}/"
+        dest: /tmp/redis/
+        owner: root
+        mode: "0644"
+      become: true
+
+    - name: 通过本地包缓存安装 Redis（不下载、不删除）
+      ansible.builtin.shell:
+        cmd: find /tmp/redis -maxdepth 1 -type f -name '*.deb' -print0 | xargs -0 dpkg -i
+      register: redis_install
+      changed_when: >-
+        'Setting up redis-server' in redis_install.stdout or
+        'Setting up redis-tools' in redis_install.stdout
+      become: true
+
+    - name: 验证 Redis 版本
+      ansible.builtin.command: redis-server --version
+      register: redis_version_check
+      changed_when: false
+
+    - name: 显示 Redis 版本
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ redis_version_check.stdout }}"

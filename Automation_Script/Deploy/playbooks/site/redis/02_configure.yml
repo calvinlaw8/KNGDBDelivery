@@ -1,0 +1,81 @@
+---
+# ============================================================
+# redis/02_configure.yml  —  Redis 主从复制配置
+# ============================================================
+# 目的：写入 redis.conf，配置主节点和从节点，启动 redis-server 服务
+# 主节点（redis_master_ip）：不含 replicaof
+# 从节点（redis_replicas）：含 replicaof 指向主节点
+# ============================================================
+
+- name: Redis 配置 - 全部节点
+  hosts: redis
+  gather_facts: false
+  tags: redis, redis-config
+
+  tasks:
+    - name: 写入 redis.conf（主节点）
+      ansible.builtin.copy:
+        dest: /etc/redis/redis.conf
+        content: |
+          bind {{ redis_bind }}
+          port {{ redis_port }}
+          daemonize no
+          supervised systemd
+          loglevel notice
+          logfile /var/log/redis/redis-server.log
+          dir /var/lib/redis
+          requirepass {{ redis_password }}
+          masterauth {{ redis_password }}
+          save 900 1
+          save 300 10
+          save 60 10000
+          appendonly yes
+          appendfsync everysec
+        owner: redis
+        group: redis
+        mode: "0640"
+      become: true
+      when: inventory_hostname == redis_master_ip
+      notify: restart redis-server
+
+    - name: 写入 redis.conf（从节点，含 replicaof）
+      ansible.builtin.copy:
+        dest: /etc/redis/redis.conf
+        content: |
+          bind {{ redis_bind }}
+          port {{ redis_port }}
+          daemonize no
+          supervised systemd
+          loglevel notice
+          logfile /var/log/redis/redis-server.log
+          dir /var/lib/redis
+          requirepass {{ redis_password }}
+          masterauth {{ redis_password }}
+          replicaof {{ redis_master_ip }} {{ redis_port }}
+          save 900 1
+          save 300 10
+          save 60 10000
+          appendonly yes
+          appendfsync everysec
+        owner: redis
+        group: redis
+        mode: "0640"
+      become: true
+      when: inventory_hostname in redis_replicas
+      notify: restart redis-server
+
+    - name: 确保 redis-server 启动并设为开机自启
+      ansible.builtin.systemd:
+        name: redis-server
+        state: started
+        enabled: true
+        daemon_reload: true
+      become: true
+
+  handlers:
+    - name: restart redis-server
+      ansible.builtin.systemd:
+        name: redis-server
+        state: restarted
+        daemon_reload: true
+      become: true

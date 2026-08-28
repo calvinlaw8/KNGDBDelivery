@@ -1,0 +1,23 @@
+# ============================================================
+# group_vars/rabbitmq.yml  —  RabbitMQ 集群变量
+# ============================================================
+
+# 种子节点（Cluster 初始化节点，作为其他节点 join 的目标）
+rabbitmq_seed_node_ip: "10.20.14.44"
+rabbitmq_seed_hostname: "T-RabbitMQ-01"
+
+rabbitmq_version: "4.2.9"
+erlang_version: "1:27.3.4.16-1"
+
+# 节点名称前缀（用于集群状态 grep 匹配）
+rabbitmq_node_prefix: "T-RabbitMQ"
+
+# Erlang Cookie（3 节点必须完全一致）
+erlang_cookie: "CHANGE_ME"
+
+# 管理员账号
+rabbitmq_admin_user: "admin"
+rabbitmq_admin_password: "CHANGE_ME"
+
+# Management Plugin 端口
+rabbitmq_management_port: 15672
