@@ -41,7 +41,9 @@ ensure_local_tools() {
 # 加载变量 & SSH 工具
 # ============================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/config.env"
+CONFIG_FILE="${DELIVERY_CONFIG_FILE:-${SCRIPT_DIR}/config.env}"
+[[ -f "${CONFIG_FILE}" ]] || err "配置文件不存在：${CONFIG_FILE}"
+source "${CONFIG_FILE}"
 LOCAL_DELIVERY_VERIFIER="${SCRIPT_DIR}/verify_delivery.sh"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
@@ -51,6 +53,13 @@ REMOTE="${ANSIBLE_NODE_USER}@${ANSIBLE_NODE_IP}"
 ssh_run() {
   SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e \
     ssh ${SSH_OPTS} "${REMOTE}" "$@"
+}
+
+# 将 sudo 密码通过 SSH 标准输入传递，避免出现在远端命令参数中。
+sudo_run() {
+  local command="$1"
+  printf '%s\n' "${ANSIBLE_NODE_PASS}" | \
+    ssh_run "sudo -S -p '' bash -c $(printf '%q' "${command}")"
 }
 
 # ============================================================
@@ -90,7 +99,7 @@ step1_set_hostname() {
     return
   fi
 
-  ssh_run "printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S hostnamectl set-hostname '${ANSIBLE_NODE_HOSTNAME}'"
+  sudo_run "hostnamectl set-hostname $(printf '%q' "${ANSIBLE_NODE_HOSTNAME}")"
 
   local actual
   actual=$(ssh_run "hostname")
@@ -178,6 +187,11 @@ step2b_upload_playbooks() {
   SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e \
     scp ${SSH_OPTS} "${LOCAL_PAYLOAD_VALIDATOR}" \
     "${REMOTE}:${REMOTE_PAYLOAD_VALIDATOR}"
+
+  ssh_run "test -f '${REMOTE_PLAYBOOK_DIR}/preflights/00_preflight.yml' && \
+           test -f '${REMOTE_PLAYBOOK_DIR}/preflights/01_server_init.yml' && \
+           test -f '${REMOTE_PLAYBOOK_DIR}/site/site.yml'" || \
+    err "远端 Playbook 目录不完整：${REMOTE_PLAYBOOK_DIR} 缺少 preflights 或 site 入口文件"
 
   local count
   count=$(ssh_run "find '${REMOTE_PLAYBOOK_DIR}' -name '*.yml' | wc -l | tr -d ' '")
@@ -479,7 +493,7 @@ step9_ping() {
 
 # Step -1: 配置模板门禁（必须在任何远程操作前执行）
 validate_configuration() {
-  local config_file="${SCRIPT_DIR}/config.env"
+  local config_file="${CONFIG_FILE}"
   local group_vars_dir="${LOCAL_PLAYBOOK_DIR}/group_vars"
   local placeholder_count
 
@@ -591,27 +605,42 @@ _run_playbook_stage() {
   local cmd="ansible-playbook ${playbook}"
   [[ -n "${tags}" ]] && cmd="${cmd} --tags ${tags}"
 
-  # 通过 SSH 前台执行，stderr 合并到 stdout，逐行输出并加时间戳前缀
-  # 关键：不使用 nohup/后台，实时看到 TASK / PLAY / ok: / changed: / failed: / RECAP
+  # 远端命令后台执行，本地持续读取输出并提供心跳；避免 dpkg/数据库初始化长时间无输出时像卡死。
+  local output_file; output_file=$(mktemp "${TMPDIR:-/tmp}/delivery5-playbook.XXXXXX")
   SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e ssh \
     -o StrictHostKeyChecking=no \
     -o LogLevel=ERROR \
     "${REMOTE}" \
-    "ANSIBLE_FORCE_COLOR=0 ${cmd}" 2>&1 \
-  | while IFS= read -r line; do
-      # 高亮关键行
-      if   [[ "${line}" == PLAY* ]];         then printf "\033[1;36m  %s\033[0m\n" "${line}"
-      elif [[ "${line}" == TASK* ]];         then printf "\033[0;33m  %s\033[0m\n" "${line}"
-      elif [[ "${line}" == *"ok:"* ]];       then printf "\033[0;32m  %s\033[0m\n" "${line}"
-      elif [[ "${line}" == *"changed:"* ]];  then printf "\033[1;33m  %s\033[0m\n" "${line}"
-      elif [[ "${line}" == *"failed:"* && "${line}" != *"failed=0"* ]]; then
-                                                  printf "\033[0;31m  %s\033[0m\n" "${line}"
-      elif [[ "${line}" == "PLAY RECAP"* ]]; then printf "\033[1;35m  %s\033[0m\n" "${line}"
-      else printf "  %s\n" "${line}"
-      fi
-    done
+    "ANSIBLE_FORCE_COLOR=0 ${cmd}" >"${output_file}" 2>&1 &
+  local ssh_pid=$!
 
-  local rc=${PIPESTATUS[0]}
+  # tail -f 保证 Ansible 每完成一行就显示；心跳保证无输出期间仍可判断进程存活。
+  tail -f "${output_file}" 2>/dev/null | while IFS= read -r line; do
+    if   [[ "${line}" == PLAY* ]];         then printf "\033[1;36m  %s\033[0m\n" "${line}"
+    elif [[ "${line}" == TASK* ]];         then printf "\033[0;33m  %s\033[0m\n" "${line}"
+    elif [[ "${line}" == *"ok:"* ]];       then printf "\033[0;32m  %s\033[0m\n" "${line}"
+    elif [[ "${line}" == *"changed:"* ]];  then printf "\033[1;33m  %s\033[0m\n" "${line}"
+    elif [[ "${line}" == *"failed:"* && "${line}" != *"failed=0"* ]]; then
+                                                printf "\033[0;31m  %s\033[0m\n" "${line}"
+    elif [[ "${line}" == "PLAY RECAP"* ]]; then printf "\033[1;35m  %s\033[0m\n" "${line}"
+    else printf "  %s\n" "${line}"
+    fi
+  done &
+  local tail_pid=$!
+
+  while kill -0 "${ssh_pid}" 2>/dev/null; do
+    local elapsed_now=$(( $(date +%s) - t0 ))
+    printf "\033[2m  … ${stage} 仍在执行，已耗时 %dm%02ds（最近输出持续写入中）\033[0m\n" \
+      "$(( elapsed_now / 60 ))" "$(( elapsed_now % 60 ))"
+    sleep 15
+  done
+
+  local rc=0
+  wait "${ssh_pid}" || rc=$?
+  sleep 1
+  kill "${tail_pid}" 2>/dev/null || true
+  wait "${tail_pid}" 2>/dev/null || true
+  /bin/rm -f "${output_file}"
   local elapsed=$(( $(date +%s) - t0 ))
   local mm=$(( elapsed / 60 ))
   local ss=$(( elapsed % 60 ))

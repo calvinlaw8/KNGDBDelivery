@@ -120,6 +120,17 @@
       when: inventory_hostname == mongodb_primary_ip
       run_once: true
 
+    - name: 等待全部副本集成员端口就绪后再初始化
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: "{{ mongodb_port }}"
+        timeout: 60
+        state: started
+      loop: "{{ [mongodb_primary_ip] + mongodb_replica_ips }}"
+      delegate_to: localhost
+      when: inventory_hostname == mongodb_primary_ip
+      run_once: true
+
     - name: 执行 rs.initiate()（若尚未初始化）
       when:
         - inventory_hostname == mongodb_primary_ip

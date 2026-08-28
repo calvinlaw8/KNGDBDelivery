@@ -37,12 +37,24 @@ bash Automation_Script/Deploy/verify_delivery.sh
 bash Automation_Script/Deploy/validate_deb_payloads.sh
 ```
 
-现场复制 `config.env.example` 并完成所有 `group_vars` 配置后，入口脚本会自动以 configured 模式重新执行交付包自检；仍存在 `CHANGE_ME`、重复节点地址或重复主机名时会在任何远程变更前终止。
+使用一键向导时不需要手工创建或填写仓库根目录的 `config.env`；向导会根据交互输入生成权限为 `600` 的 `Automation_Script/Deploy/.runtime/config.env` 及运行时 `group_vars`，并在远程变更前执行配置门禁。只有采用旧的手工/自动化入口时，才需要复制 `config.env.example` 并完成 `group_vars` 配置；其中仍存在 `CHANGE_ME`、重复节点地址或重复主机名时会终止执行。
+
+推荐使用交互式一键部署向导。它会询问管理节点、12 台数据库节点、组件密码、RabbitMQ Cookie 和 MySQL VIP，生成本机 `.runtime/` 配置后自动调用现有 Ansible 流程：
+
+```bash
+bash Automation_Script/Deploy/install.sh
+```
+
+向导运行过程中按提示完成信息采集即可，不需要另外编辑 `config.env`。当前测试环境需要输入 1 台 Ansible 管理节点、Redis/RabbitMQ/MongoDB/MySQL 各 3 台节点、数据库 SSH 账号密码，以及各组件运行密码和 MySQL VIP；密码通过隐藏输入并要求二次确认。
+
+向导生成的运行时配置、凭据摘要和密码文件位于 `Automation_Script/Deploy/.runtime/`，目录权限为 `700`，敏感文件权限为 `600`，已被 Git 忽略。MongoDB keyFile 由 Playbook 自动生成并分发到各节点，不需要手工输入。安装结束后，终端会显示安装摘要和敏感凭据文件位置；请由授权人员妥善保管，不要把该目录上传或写入验收报告。
+
+需要自动化或已有受控配置时，仍可使用原入口：
 
 ```bash
 cd Automation_Script/Deploy
 cp config.env.example config.env
-# 编辑 config.env，填写现场管理节点、12 台数据库服务器及账号信息
+# 编辑 config.env 和 playbooks/group_vars/*.yml
 bash init_ansible.sh deploy
 ```
 
@@ -69,12 +81,28 @@ bash init_ansible.sh deploy
 
 部署前必须确认：
 
-1. 控制节点可以通过 SSH 访问全部数据库节点，并具备免密 sudo 权限。
+1. 控制节点可以通过 SSH 访问全部数据库节点；控制节点自身以及全部数据库节点都必须满足以下条件之一：允许 `root` 通过 SSH 登录，或普通管理用户登录后可以免密提权到 `root`。当前默认管理用户为 `sysadmin`，必须通过 `sudo -n true` 验证成功；仅能输入 sudo 密码或仅能使用 SSH 密码登录，均不满足部署硬要求。
 2. 控制节点和数据库节点均为 Ubuntu 24.04.x，架构、磁盘和内存满足现场规格要求。
 3. 数据库节点之间的主机名解析、SSH、组件端口和集群通信端口已放通。
 4. 现场已确认节点 IP、主机名、网卡名、VIP、账号和密码，并由授权人员保管。
 5. 已确认统一安装方式，并准备好四类组件对应的完整离线载荷、依赖闭包和 SHA256 校验值；当前正式载荷共 46 个包，清单见 `sha256-packages.txt`。
 6. 已安排断网条件下的首次部署、重复执行和故障演练窗口；正式测试环境的首次部署、服务启动、HA 验收和幂等重跑已完成，生产环境仍须替换为现场受控配置后执行。
+
+### 权限硬要求验证
+
+在执行初始化或部署前，逐台使用部署账号验证免密提权：
+
+```bash
+ssh sysadmin@<节点IP> 'sudo -n true && id -u'
+```
+
+命令必须成功并返回 `0`。如果现场使用 `root` 直接 SSH，则应验证：
+
+```bash
+ssh root@<节点IP> 'id -u'
+```
+
+应返回 `0`。控制节点和 12 台数据库节点均验证通过后，才允许继续执行 `init_ansible.sh`；该要求适用于首次部署、断点重跑和故障恢复。
 
 ## 4. 现场配置
 
