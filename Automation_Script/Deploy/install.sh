@@ -230,9 +230,9 @@ reset_configuration() {
   info "请选择需要修改的配置"
   printf '1. Redis 节点组\n2. RabbitMQ 节点组\n3. MongoDB 节点组\n4. MySQL 节点组\n'
   printf '5. Ansible 管理节点\n6. 数据库 SSH\n7. Redis 凭据\n8. RabbitMQ 凭据\n'
-  printf '9. MongoDB 凭据\n10. MySQL 凭据和 VIP\n11. 全部重新录入\n0. 取消部署\n'
+    printf '9. MongoDB 凭据\n10. MySQL 凭据和 VIP\n11. 全部重新录入\n12. 取消修改，返回总览\n0. 取消部署\n'
   while true; do
-    ask "请选择要修改的配置（0-11）"
+      ask "请选择要修改的配置（0-12）"
     choice="${ANSWER}"
     case "${choice}" in
       1) edit_node_group "Redis" REDIS; return ;;
@@ -246,8 +246,9 @@ reset_configuration() {
       9) ask_mongodb_credentials; return ;;
       10) ask_mysql_credentials; return ;;
       11) collect_all_inputs; return ;;
+        12) return ;;
       0) exit 0 ;;
-      *) warn "请输入 0 到 11" ;;
+        *) warn "请输入 0 到 12" ;;
     esac
   done
 }
