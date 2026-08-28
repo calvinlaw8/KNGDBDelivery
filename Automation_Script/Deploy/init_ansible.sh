@@ -53,6 +53,13 @@ ssh_run() {
     ssh ${SSH_OPTS} "${REMOTE}" "$@"
 }
 
+# 将 sudo 密码通过 SSH 标准输入传递，避免出现在远端命令参数中。
+sudo_run() {
+  local command="$1"
+  printf '%s\n' "${ANSIBLE_NODE_PASS}" | \
+    ssh_run "sudo -S -p '' bash -c $(printf '%q' "${command}")"
+}
+
 # ============================================================
 # ── 安装阶段 ────────────────────────────────────────────────
 # ============================================================
@@ -90,7 +97,7 @@ step1_set_hostname() {
     return
   fi
 
-  ssh_run "printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S hostnamectl set-hostname '${ANSIBLE_NODE_HOSTNAME}'"
+  sudo_run "hostnamectl set-hostname $(printf '%q' "${ANSIBLE_NODE_HOSTNAME}")"
 
   local actual
   actual=$(ssh_run "hostname")
