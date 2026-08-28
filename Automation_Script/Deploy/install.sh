@@ -56,6 +56,44 @@ ask_node_group() {
   done
 }
 
+ask_node() {
+  local label="$1" prefix="$2" index="$3" ip hostname current_ip current_hostname
+  case "${prefix}" in
+    REDIS) current_ip="${REDIS_IPS[$index]:-}"; current_hostname="${REDIS_HOSTNAMES[$index]:-}" ;;
+    RABBITMQ) current_ip="${RABBITMQ_IPS[$index]:-}"; current_hostname="${RABBITMQ_HOSTNAMES[$index]:-}" ;;
+    MONGODB) current_ip="${MONGODB_IPS[$index]:-}"; current_hostname="${MONGODB_HOSTNAMES[$index]:-}" ;;
+    MYSQL) current_ip="${MYSQL_IPS[$index]:-}"; current_hostname="${MYSQL_HOSTNAMES[$index]:-}" ;;
+    *) die "未知节点组：${prefix}" ;;
+  esac
+  ask "${label} 节点$((index + 1)) IP" "${current_ip}"; ip="${ANSWER}"
+  ask "${label} 节点$((index + 1)) 主机名" "${current_hostname}"; hostname="${ANSWER}"
+  case "${prefix}" in
+    REDIS) REDIS_IPS[$index]="${ip}"; REDIS_HOSTNAMES[$index]="${hostname}" ;;
+    RABBITMQ) RABBITMQ_IPS[$index]="${ip}"; RABBITMQ_HOSTNAMES[$index]="${hostname}" ;;
+    MONGODB) MONGODB_IPS[$index]="${ip}"; MONGODB_HOSTNAMES[$index]="${hostname}" ;;
+    MYSQL) MYSQL_IPS[$index]="${ip}"; MYSQL_HOSTNAMES[$index]="${hostname}" ;;
+  esac
+}
+
+edit_node_group() {
+  local label="$1" prefix="$2" choice
+  while true; do
+    show_node_group "${label} group" "${prefix}"
+    printf '1. 修改节点 1\n2. 修改节点 2\n3. 修改节点 3\n4. 整组重新录入\n5. 返回总览\n0. 取消部署\n'
+    ask "请选择操作（0-5）"
+    choice="${ANSWER}"
+    case "${choice}" in
+      1) ask_node "${label}" "${prefix}" 0 ;;
+      2) ask_node "${label}" "${prefix}" 1 ;;
+      3) ask_node "${label}" "${prefix}" 2 ;;
+      4) ask_node_group "${label}" "${prefix}" ;;
+      5) return ;;
+      0) cancel_deployment; return ;;
+      *) warn "请输入 0 到 5" ;;
+    esac
+  done
+}
+
 ask_management_config() {
   ask "Ansible 管理节点 IP"; ANSIBLE_NODE_IP="${ANSWER}"
   ask "Ansible 管理节点主机名"; ANSIBLE_NODE_HOSTNAME="${ANSWER}"
@@ -69,10 +107,26 @@ ask_database_ssh_config() {
 }
 
 ask_component_config() {
+  ask_redis_credentials
+  ask_rabbitmq_credentials
+  ask_mongodb_credentials
+  ask_mysql_credentials
+}
+
+ask_redis_credentials() {
   ask_secret "Redis 密码"; redis_password="${ANSWER}"
+}
+
+ask_rabbitmq_credentials() {
   ask_secret "RabbitMQ Erlang Cookie"; rabbitmq_cookie="${ANSWER}"
   ask_secret "RabbitMQ admin 密码"; rabbitmq_admin_password="${ANSWER}"
+}
+
+ask_mongodb_credentials() {
   ask_secret "MongoDB admin 密码"; mongodb_admin_password="${ANSWER}"
+}
+
+ask_mysql_credentials() {
   ask_secret "MySQL root 密码"; mysql_root_password="${ANSWER}"
   ask_secret "MySQL replication 密码"; mysql_repl_password="${ANSWER}"
   ask "MySQL Keepalived VIP"; mysql_vip="${ANSWER}"
@@ -102,24 +156,98 @@ show_overview() {
   printf '组件密码/Cookie：已输入\nMySQL Keepalived VIP：%s\n' "${mysql_vip}"
 }
 
+is_valid_ip() {
+  local value="$1" part
+  local old_ifs="${IFS}"
+  [[ "${value}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  IFS='.'
+  read -r -a parts <<< "${value}"
+  IFS="${old_ifs}"
+  for part in "${parts[@]}"; do
+    ((10#${part} <= 255)) || return 1
+  done
+}
+
+is_valid_hostname() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]$|^[A-Za-z0-9]$ ]]
+}
+
+validate_configuration() {
+  local error_count=0 i j ip hostname
+  local all_ips all_hostnames
+  all_ips=("${ANSIBLE_NODE_IP}" "${REDIS_IPS[@]}" "${RABBITMQ_IPS[@]}" "${MONGODB_IPS[@]}" "${MYSQL_IPS[@]}")
+  all_hostnames=("${ANSIBLE_NODE_HOSTNAME}" "${REDIS_HOSTNAMES[@]}" "${RABBITMQ_HOSTNAMES[@]}" "${MONGODB_HOSTNAMES[@]}" "${MYSQL_HOSTNAMES[@]}")
+  for ip in "${all_ips[@]}"; do
+    if ! is_valid_ip "${ip}"; then
+      warn "IP 地址格式无效：${ip}"; error_count=$((error_count + 1))
+    fi
+  done
+  for hostname in "${all_hostnames[@]}"; do
+    if ! is_valid_hostname "${hostname}"; then
+      warn "主机名格式无效：${hostname}"; error_count=$((error_count + 1))
+    fi
+  done
+  if ! is_valid_ip "${ANSIBLE_NODE_IP}"; then
+    warn "Ansible 管理节点 IP 地址格式无效：${ANSIBLE_NODE_IP}"; error_count=$((error_count + 1))
+  fi
+  if ! is_valid_ip "${mysql_vip}"; then
+    warn "MySQL VIP 地址格式无效：${mysql_vip}"; error_count=$((error_count + 1))
+  fi
+  for ((i = 0; i < ${#all_ips[@]}; i++)); do
+    for ((j = i + 1; j < ${#all_ips[@]}; j++)); do
+      if [[ "${all_ips[$i]}" == "${all_ips[$j]}" ]]; then
+        warn "节点 IP 重复：${all_ips[$i]}"; error_count=$((error_count + 1))
+      fi
+    done
+  done
+  for ((i = 0; i < ${#all_hostnames[@]}; i++)); do
+    for ((j = i + 1; j < ${#all_hostnames[@]}; j++)); do
+      if [[ "${all_hostnames[$i]}" == "${all_hostnames[$j]}" ]]; then
+        warn "节点主机名重复：${all_hostnames[$i]}"; error_count=$((error_count + 1))
+      fi
+    done
+  done
+  for ip in "${all_ips[@]}"; do
+    if [[ "${mysql_vip}" == "${ip}" ]]; then
+      warn "MySQL VIP 不能与数据库节点 IP 相同：${mysql_vip}"; error_count=$((error_count + 1))
+    fi
+  done
+  ((error_count == 0))
+}
+
+cancel_deployment() {
+  local answer
+  ask "确定取消本次部署？当前输入不会保存" "n"
+  answer="${ANSWER}"
+  case "${answer}" in
+    [Yy]) exit 0 ;;
+    *) info "已返回配置流程" ;;
+  esac
+}
+
 reset_configuration() {
   local choice
-  info "Which option will you want reset"
-  printf '1. REDIS group\n2. RABBITMQ group\n3. MONGODB group\n4. MYSQL group\n'
-  printf '5. Ansible management node\n6. Database SSH\n7. Component credentials\n8. all reset\n'
+  info "请选择需要修改的配置"
+  printf '1. Redis 节点组\n2. RabbitMQ 节点组\n3. MongoDB 节点组\n4. MySQL 节点组\n'
+  printf '5. Ansible 管理节点\n6. 数据库 SSH\n7. Redis 凭据\n8. RabbitMQ 凭据\n'
+  printf '9. MongoDB 凭据\n10. MySQL 凭据和 VIP\n11. 全部重新录入\n0. 取消部署\n'
   while true; do
-    ask "请选择要修改的组（1-8）"
+    ask "请选择要修改的配置（0-11）"
     choice="${ANSWER}"
     case "${choice}" in
-      1) ask_node_group "Redis" REDIS; return ;;
-      2) ask_node_group "RabbitMQ" RABBITMQ; return ;;
-      3) ask_node_group "MongoDB" MONGODB; return ;;
-      4) ask_node_group "MySQL" MYSQL; return ;;
+      1) edit_node_group "Redis" REDIS; return ;;
+      2) edit_node_group "RabbitMQ" RABBITMQ; return ;;
+      3) edit_node_group "MongoDB" MONGODB; return ;;
+      4) edit_node_group "MySQL" MYSQL; return ;;
       5) ask_management_config; return ;;
       6) ask_database_ssh_config; return ;;
-      7) ask_component_config; return ;;
-      8) collect_all_inputs; return ;;
-      *) warn "请输入 1 到 8" ;;
+      7) ask_redis_credentials; return ;;
+      8) ask_rabbitmq_credentials; return ;;
+      9) ask_mongodb_credentials; return ;;
+      10) ask_mysql_credentials; return ;;
+      11) collect_all_inputs; return ;;
+      0) exit 0 ;;
+      *) warn "请输入 0 到 11" ;;
     esac
   done
 }
@@ -140,12 +268,18 @@ confirm_overview() {
   local answer
   while true; do
     show_overview
-    ask "以上参数是否确定？输入 n 选择修改项，直接回车确认" "y"
+    if ! validate_configuration; then
+      warn "参数校验未通过，请先修改错误配置"
+      reset_configuration
+      continue
+    fi
+    ask "确认以上配置并开始部署？[y] 开始部署，[n] 返回修改菜单，[q] 取消" "y"
     answer="${ANSWER}"
     case "${answer}" in
       [Yy]) return ;;
       [Nn]) reset_configuration ;;
-      *) warn "请输入 y 确认，或输入 n 选择修改项" ;;
+      [Qq]) cancel_deployment ;;
+      *) warn "请输入 y、n 或 q" ;;
     esac
   done
 }
