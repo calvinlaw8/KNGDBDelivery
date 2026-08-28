@@ -6,6 +6,7 @@
 **/config.env
 **/mongodb.keyfile
 **/.runtime/
+数据库集群虚拟机重置命令/
 账号密码*.xlsx
 本地验证环境初始化与登录注意事项.md
 
