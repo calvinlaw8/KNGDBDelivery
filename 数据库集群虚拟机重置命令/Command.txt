@@ -1,0 +1,3 @@
+ansible-playbook --ask-vault-pass T-eCopilot.yaml
+
+密码：2026

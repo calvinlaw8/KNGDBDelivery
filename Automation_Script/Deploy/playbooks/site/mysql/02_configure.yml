@@ -202,14 +202,16 @@
       when: not mysql_db_dir.stat.exists
 
     - name: 修改 root 密码（使用临时密码连接）
-      ansible.builtin.shell:
-        cmd: >
-          {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
-          --connect-expired-password
-          -u root
-          -p"{{ temp_password.stdout }}"
-          -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
+      ansible.builtin.command:
+        argv:
+          - "{{ mysql_client_bin }}"
+          - "--socket=/tmp/mysql.sock"
+          - "--connect-expired-password"
+          - "-u"
+          - root
+          - "-p{{ temp_password.stdout | trim }}"
+          - "-e"
+          - "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
       when: not mysql_db_dir.stat.exists
       become: true
       no_log: true
@@ -231,6 +233,56 @@
         timeout: 30
       delegate_to: localhost
       when: mysql_db_dir.stat.exists
+
+    - name: 检查已初始化节点的配置 root 密码是否可用
+      ansible.builtin.command:
+        argv:
+          - "{{ mysql_client_bin }}"
+          - "--socket=/tmp/mysql.sock"
+          - -u
+          - root
+          - "-p{{ mysql_root_password }}"
+          - -e
+          - SELECT 1
+      register: configured_root_auth
+      changed_when: false
+      failed_when: false
+      when: mysql_db_dir.stat.exists
+      become: true
+      no_log: true
+
+    - name: 捕获未完成初始化节点的临时 root 密码
+      ansible.builtin.shell:
+        cmd: >
+          grep -oP '(?<=A temporary password is generated for root@localhost: )\S+'
+          {{ mysql_log_dir }}/mysqld.err
+      register: recovery_temp_password
+      changed_when: false
+      failed_when: false
+      when:
+        - mysql_db_dir.stat.exists
+        - configured_root_auth.rc != 0
+      become: true
+      no_log: true
+
+    - name: 修复已初始化但未完成 root 密码设置的节点
+      ansible.builtin.command:
+        argv:
+          - "{{ mysql_client_bin }}"
+          - "--socket=/tmp/mysql.sock"
+          - --connect-expired-password
+          - -u
+          - root
+          - "-p{{ recovery_temp_password.stdout | trim }}"
+          - -e
+          - "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
+      when:
+        - mysql_db_dir.stat.exists
+        - configured_root_auth.rc != 0
+        - recovery_temp_password.rc == 0
+        - recovery_temp_password.stdout | trim | length > 0
+      become: true
+      no_log: true
 
     - name: 验证 mysqld 服务状态
       ansible.builtin.command: "systemctl is-active {{ mysql_service_name }}"

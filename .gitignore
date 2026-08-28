@@ -5,7 +5,9 @@
 # 现场配置和敏感凭据
 **/config.env
 **/mongodb.keyfile
+**/.runtime/
 账号密码*.xlsx
+本地验证环境初始化与登录注意事项.md
 
 # 本地 Ansible / Python 运行产物
 .venv/
