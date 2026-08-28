@@ -114,23 +114,23 @@ ask_component_config() {
 }
 
 ask_redis_credentials() {
-  ask_secret "Redis 密码"; redis_password="${ANSWER}"
+  ask_secret "Redis 服务访问密码（用于客户端连接 Redis，不是服务器 SSH 登录密码）"; redis_password="${ANSWER}"
 }
 
 ask_rabbitmq_credentials() {
-  ask_secret "RabbitMQ Erlang Cookie"; rabbitmq_cookie="${ANSWER}"
-  ask_secret "RabbitMQ admin 密码"; rabbitmq_admin_password="${ANSWER}"
+  ask_secret "RabbitMQ 节点间通信 Cookie（用于 RabbitMQ 集群节点互认证，不是服务器 SSH 登录密码）"; rabbitmq_cookie="${ANSWER}"
+  ask_secret "RabbitMQ 管理员服务密码（用于 RabbitMQ 管理和客户端访问，不是服务器 SSH 登录密码）"; rabbitmq_admin_password="${ANSWER}"
 }
 
 ask_mongodb_credentials() {
-  ask_secret "MongoDB admin 密码"; mongodb_admin_password="${ANSWER}"
+  ask_secret "MongoDB admin 服务访问密码（用于登录 MongoDB，不是服务器 SSH 登录密码）"; mongodb_admin_password="${ANSWER}"
 }
 
 ask_mysql_credentials() {
-  ask_secret "MySQL root 密码"; mysql_root_password="${ANSWER}"
-  ask_secret "MySQL replication 密码"; mysql_repl_password="${ANSWER}"
+  ask_secret "MySQL root 数据库密码（用于登录 MySQL，不是服务器 SSH 登录密码）"; mysql_root_password="${ANSWER}"
+  ask_secret "MySQL replication 复制账号密码（用于 MySQL 主从复制，不是服务器 SSH 登录密码）"; mysql_repl_password="${ANSWER}"
   ask "MySQL Keepalived VIP"; mysql_vip="${ANSWER}"
-  ask_secret "Keepalived auth_pass"; keepalived_auth_pass="${ANSWER}"
+  ask_secret "Keepalived 节点认证密码（用于 MySQL 高可用节点通信，不是服务器 SSH 登录密码）"; keepalived_auth_pass="${ANSWER}"
 }
 
 show_node_group() {
