@@ -40,11 +40,80 @@ ask_secret() {
   done
 }
 
+is_valid_subnet_prefix() {
+  local value="$1" part
+  local old_ifs="${IFS}"
+  [[ "${value}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  IFS='.'
+  read -r -a parts <<< "${value}"
+  IFS="${old_ifs}"
+  for part in "${parts[@]}"; do
+    ((10#${part} <= 255)) || return 1
+  done
+}
+
+is_valid_host_number() {
+  [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 254))
+}
+
+ask_subnet_prefix() {
+  local label="$1" prefix="$2" current_prefix="${3:-}" subnet
+  while true; do
+    if [[ -n "${current_prefix}" ]]; then
+      ask "${label} 网段前三段（例如 10.20.14）" "${current_prefix}"
+    else
+      ask "${label} 网段前三段（例如 10.20.14）"
+    fi
+    subnet="${ANSWER}"
+    if is_valid_subnet_prefix "${subnet}"; then
+      case "${prefix}" in
+        REDIS) REDIS_SUBNET_PREFIX="${subnet}" ;;
+        RABBITMQ) RABBITMQ_SUBNET_PREFIX="${subnet}" ;;
+        MONGODB) MONGODB_SUBNET_PREFIX="${subnet}" ;;
+        MYSQL) MYSQL_SUBNET_PREFIX="${subnet}" ;;
+        *) die "未知节点组：${prefix}" ;;
+      esac
+      return
+    fi
+    warn "网段格式无效，请输入前三段，例如 10.20.14"
+    current_prefix=""
+  done
+}
+
+ask_node_ip() {
+  local label="$1" prefix="$2" index="$3" current_ip="$4" subnet="$5" input
+  while true; do
+    ask "${label} 节点$((index + 1)) 主机号或完整 IP（当前 ${current_ip}）" "${current_ip}"
+    input="${ANSWER}"
+    if is_valid_host_number "${input}"; then
+      ANSWER="${subnet}.${input}"
+      return
+    fi
+    if is_valid_ip "${input}"; then
+      ANSWER="${input}"
+      return
+    fi
+    warn "请输入 1-254 的主机号，或完整 IPv4 地址"
+  done
+}
+
 ask_node_group() {
-  local label="$1" prefix="$2" i
-  local ip hostname
+  local label="$1" prefix="$2" i subnet ip hostname
+  case "${prefix}" in
+    REDIS) ask_subnet_prefix "${label}" "${prefix}" "${REDIS_SUBNET_PREFIX:-}" ;;
+    RABBITMQ) ask_subnet_prefix "${label}" "${prefix}" "${RABBITMQ_SUBNET_PREFIX:-}" ;;
+    MONGODB) ask_subnet_prefix "${label}" "${prefix}" "${MONGODB_SUBNET_PREFIX:-}" ;;
+    MYSQL) ask_subnet_prefix "${label}" "${prefix}" "${MYSQL_SUBNET_PREFIX:-}" ;;
+    *) die "未知节点组：${prefix}" ;;
+  esac
+  case "${prefix}" in
+    REDIS) subnet="${REDIS_SUBNET_PREFIX}" ;;
+    RABBITMQ) subnet="${RABBITMQ_SUBNET_PREFIX}" ;;
+    MONGODB) subnet="${MONGODB_SUBNET_PREFIX}" ;;
+    MYSQL) subnet="${MYSQL_SUBNET_PREFIX}" ;;
+  esac
   for i in 1 2 3; do
-    ask "${label} 节点${i} IP"; ip="${ANSWER}"
+    ask_node_ip "${label}" "${prefix}" "$((i - 1))" "" "${subnet}"; ip="${ANSWER}"
     ask "${label} 节点${i} 主机名"; hostname="${ANSWER}"
     case "${prefix}" in
       REDIS) REDIS_IPS[$((i - 1))]="${ip}"; REDIS_HOSTNAMES[$((i - 1))]="${hostname}" ;;
@@ -57,21 +126,22 @@ ask_node_group() {
 }
 
 ask_node() {
-  local label="$1" prefix="$2" index="$3" ip hostname current_ip current_hostname
+  local label="$1" prefix="$2" index="$3" ip hostname current_ip current_hostname subnet current_subnet
   case "${prefix}" in
-    REDIS) current_ip="${REDIS_IPS[$index]:-}"; current_hostname="${REDIS_HOSTNAMES[$index]:-}" ;;
-    RABBITMQ) current_ip="${RABBITMQ_IPS[$index]:-}"; current_hostname="${RABBITMQ_HOSTNAMES[$index]:-}" ;;
-    MONGODB) current_ip="${MONGODB_IPS[$index]:-}"; current_hostname="${MONGODB_HOSTNAMES[$index]:-}" ;;
-    MYSQL) current_ip="${MYSQL_IPS[$index]:-}"; current_hostname="${MYSQL_HOSTNAMES[$index]:-}" ;;
+    REDIS) current_ip="${REDIS_IPS[$index]:-}"; current_hostname="${REDIS_HOSTNAMES[$index]:-}"; current_subnet="${REDIS_SUBNET_PREFIX:-}" ;;
+    RABBITMQ) current_ip="${RABBITMQ_IPS[$index]:-}"; current_hostname="${RABBITMQ_HOSTNAMES[$index]:-}"; current_subnet="${RABBITMQ_SUBNET_PREFIX:-}" ;;
+    MONGODB) current_ip="${MONGODB_IPS[$index]:-}"; current_hostname="${MONGODB_HOSTNAMES[$index]:-}"; current_subnet="${MONGODB_SUBNET_PREFIX:-}" ;;
+    MYSQL) current_ip="${MYSQL_IPS[$index]:-}"; current_hostname="${MYSQL_HOSTNAMES[$index]:-}"; current_subnet="${MYSQL_SUBNET_PREFIX:-}" ;;
     *) die "未知节点组：${prefix}" ;;
   esac
-  ask "${label} 节点$((index + 1)) IP" "${current_ip}"; ip="${ANSWER}"
+  ask_subnet_prefix "${label}" "${prefix}" "${current_subnet}"; subnet="${ANSWER}"
+  ask_node_ip "${label}" "${prefix}" "${index}" "${current_ip}" "${subnet}"; ip="${ANSWER}"
   ask "${label} 节点$((index + 1)) 主机名" "${current_hostname}"; hostname="${ANSWER}"
   case "${prefix}" in
-    REDIS) REDIS_IPS[$index]="${ip}"; REDIS_HOSTNAMES[$index]="${hostname}" ;;
-    RABBITMQ) RABBITMQ_IPS[$index]="${ip}"; RABBITMQ_HOSTNAMES[$index]="${hostname}" ;;
-    MONGODB) MONGODB_IPS[$index]="${ip}"; MONGODB_HOSTNAMES[$index]="${hostname}" ;;
-    MYSQL) MYSQL_IPS[$index]="${ip}"; MYSQL_HOSTNAMES[$index]="${hostname}" ;;
+    REDIS) REDIS_SUBNET_PREFIX="${subnet}"; REDIS_IPS[$index]="${ip}"; REDIS_HOSTNAMES[$index]="${hostname}" ;;
+    RABBITMQ) RABBITMQ_SUBNET_PREFIX="${subnet}"; RABBITMQ_IPS[$index]="${ip}"; RABBITMQ_HOSTNAMES[$index]="${hostname}" ;;
+    MONGODB) MONGODB_SUBNET_PREFIX="${subnet}"; MONGODB_IPS[$index]="${ip}"; MONGODB_HOSTNAMES[$index]="${hostname}" ;;
+    MYSQL) MYSQL_SUBNET_PREFIX="${subnet}"; MYSQL_IPS[$index]="${ip}"; MYSQL_HOSTNAMES[$index]="${hostname}" ;;
   esac
 }
 
@@ -130,7 +200,14 @@ ask_mysql_credentials() {
   ask_secret "MySQL root 数据库密码（用于登录 MySQL，不是服务器 SSH 登录密码）"; mysql_root_password="${ANSWER}"
   ask_secret "MySQL replication 复制账号密码（用于 MySQL 主从复制，不是服务器 SSH 登录密码）"; mysql_repl_password="${ANSWER}"
   ask "MySQL Keepalived VIP"; mysql_vip="${ANSWER}"
-  ask_secret "Keepalived 节点认证密码（用于 MySQL 高可用节点通信，不是服务器 SSH 登录密码）"; keepalived_auth_pass="${ANSWER}"
+  while true; do
+    ask_secret "Keepalived 节点认证密码（用于 MySQL 高可用节点通信，不是服务器 SSH 登录密码，最多 8 个字符）"
+    keepalived_auth_pass="${ANSWER}"
+    if [[ "${#keepalived_auth_pass}" -le 8 ]]; then
+      break
+    fi
+    warn "Keepalived auth_pass 最多 8 个字符，请重新输入"
+  done
 }
 
 show_node_group() {
@@ -247,7 +324,7 @@ reset_configuration() {
       10) ask_mysql_credentials; return ;;
       11) collect_all_inputs; return ;;
         12) return ;;
-      0) exit 0 ;;
+      0) cancel_deployment ;;
         *) warn "请输入 0 到 12" ;;
     esac
   done
@@ -341,7 +418,21 @@ main() {
   cp "${SCRIPT_DIR}/playbooks/group_vars/"*.yml "${RUNTIME_PLAYBOOK_DIR}/group_vars/"
 
   info "交付五一键部署向导"
+  printf '本向导将配置 Redis、RabbitMQ、MongoDB、MySQL 四套三节点服务，并通过离线 Ansible 完成部署。\n'
+  printf '部署会修改目标服务器的主机名、/etc/hosts、软件和服务配置。预计耗时约 10-30 分钟。\n'
+  printf '前置条件：Ubuntu 24.04.x amd64、SSH 可达、Linux 账号可 sudo、交付包离线资产完整。\n'
+  printf '每个组件组先输入网段前三段（例如 10.20.14），节点再输入最后一段主机号。\n'
+  printf '详细说明：%s\n项目文档：%s\n' "${SCRIPT_DIR}/部署向导说明.md" "${PROJECT_ROOT}/README.md"
   warn "密码和 Cookie 只保存到 ${RUNTIME_DIR}，不会写入 Git 或普通操作日志。"
+  printf '\n1. 开始录入配置\n0. 退出向导\n'
+  local start_choice
+  ask "请选择操作（0-1）" "1"
+  start_choice="${ANSWER}"
+  case "${start_choice}" in
+    1) ;;
+    0) cancel_deployment ;;
+    *) die "请输入 0 或 1" ;;
+  esac
 
   collect_all_inputs
   confirm_overview

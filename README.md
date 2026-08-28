@@ -45,6 +45,8 @@ bash Automation_Script/Deploy/validate_deb_payloads.sh
 bash Automation_Script/Deploy/install.sh
 ```
 
+启动时会先显示简短前置条件和变更范围，详细说明见 `Automation_Script/Deploy/部署向导说明.md`。每个组件组先输入网段前三段（例如 `10.20.14`），每个节点输入最后一段主机号（例如 `21`），也可以输入完整 IP；修改单节点时支持保留原值。部署阶段默认只显示阶段和当前 Ansible 任务，完整输出按阶段保存到 `.runtime/logs/`，需要现场排查时可使用 `bash Automation_Script/Deploy/init_ansible.sh deploy --verbose`。
+
 向导运行过程中按提示完成信息采集即可，不需要另外编辑 `config.env`。当前测试环境需要输入 1 台 Ansible 管理节点、Redis/RabbitMQ/MongoDB/MySQL 各 3 台节点、数据库服务器上的 Linux 系统登录账号和密码（用于 SSH 登录服务器、上传文件及执行部署，不是 MySQL/MongoDB/Redis/RabbitMQ 数据库账号），以及各组件运行密码和 MySQL VIP；密码通过隐藏输入并要求二次确认。全部参数输入完成后会显示一次总览，并在部署前校验 IP、主机名、重复节点和 VIP 冲突。确认阶段输入 `n` 可进入修改菜单：选择数据库节点组后，还可以只修改节点 1/2/3 或整组重录；修改节点时显示原值，直接回车保留原值。管理节点、数据库服务器 SSH 登录信息和四类组件凭据也可以分别修改，输入 `0` 可取消部署。完成所选修改后会自动返回总览，只有输入 `y` 或直接回车确认后才会生成运行时配置并开始部署；输入 `q` 可在最终确认阶段取消。
 
 向导生成的运行时配置、凭据摘要和密码文件位于 `Automation_Script/Deploy/.runtime/`，目录权限为 `700`，敏感文件权限为 `600`，已被 Git 忽略。MongoDB keyFile 由 Playbook 自动生成并分发到各节点，不需要手工输入。安装结束后，终端会显示安装摘要和敏感凭据文件位置；请由授权人员妥善保管，不要把该目录上传或写入验收报告。

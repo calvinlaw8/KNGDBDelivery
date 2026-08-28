@@ -44,6 +44,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${DELIVERY_CONFIG_FILE:-${SCRIPT_DIR}/config.env}"
 [[ -f "${CONFIG_FILE}" ]] || err "配置文件不存在：${CONFIG_FILE}"
 source "${CONFIG_FILE}"
+DELIVERY_LOG_DIR="${DELIVERY_LOG_DIR:-$(cd "$(dirname "${CONFIG_FILE}")" && pwd)/logs}"
+VERBOSE=0
 LOCAL_DELIVERY_VERIFIER="${SCRIPT_DIR}/verify_delivery.sh"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
@@ -589,7 +591,7 @@ main() {
 # 用法：bash init_ansible.sh deploy
 # ============================================================
 
-# 在远程 Ansible 节点上实时执行 playbook，并为本地终端流式输出带时间戳的进度行
+# 在远程 Ansible 节点上执行 playbook；默认只显示任务级进度，--verbose 显示完整输出。
 _run_playbook_stage() {
   local stage="$1"          # 阶段名称（用于显示）
   local tags="$2"           # --tags 参数，preflight 不传 tags 时留空
@@ -605,7 +607,10 @@ _run_playbook_stage() {
   local cmd="ansible-playbook ${playbook}"
   [[ -n "${tags}" ]] && cmd="${cmd} --tags ${tags}"
 
-  # 远端命令后台执行，本地持续读取输出并提供心跳；避免 dpkg/数据库初始化长时间无输出时像卡死。
+  mkdir -p "${DELIVERY_LOG_DIR}"
+  chmod 700 "${DELIVERY_LOG_DIR}"
+
+  # 远端命令后台执行，本地持续读取输出并提供心跳；临时文件在阶段结束后转存为受保护日志。
   local output_file; output_file=$(mktemp "${TMPDIR:-/tmp}/delivery5-playbook.XXXXXX")
   SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e ssh \
     -o StrictHostKeyChecking=no \
@@ -614,16 +619,18 @@ _run_playbook_stage() {
     "ANSIBLE_FORCE_COLOR=0 ${cmd}" >"${output_file}" 2>&1 &
   local ssh_pid=$!
 
-  # tail -f 保证 Ansible 每完成一行就显示；心跳保证无输出期间仍可判断进程存活。
+  # 详细模式保留完整输出；默认模式只保留 PLAY、TASK、失败和汇总行。
   tail -f "${output_file}" 2>/dev/null | while IFS= read -r line; do
-    if   [[ "${line}" == PLAY* ]];         then printf "\033[1;36m  %s\033[0m\n" "${line}"
-    elif [[ "${line}" == TASK* ]];         then printf "\033[0;33m  %s\033[0m\n" "${line}"
-    elif [[ "${line}" == *"ok:"* ]];       then printf "\033[0;32m  %s\033[0m\n" "${line}"
-    elif [[ "${line}" == *"changed:"* ]];  then printf "\033[1;33m  %s\033[0m\n" "${line}"
-    elif [[ "${line}" == *"failed:"* && "${line}" != *"failed=0"* ]]; then
-                                                printf "\033[0;31m  %s\033[0m\n" "${line}"
-    elif [[ "${line}" == "PLAY RECAP"* ]]; then printf "\033[1;35m  %s\033[0m\n" "${line}"
-    else printf "  %s\n" "${line}"
+    if [[ "${VERBOSE}" -eq 1 ]]; then
+      printf "  %s\n" "${line}"
+    elif [[ "${line}" == PLAY\ * ]]; then
+      printf "\033[1;36m  %s\033[0m\n" "${line}"
+    elif [[ "${line}" == TASK\ * ]]; then
+      printf "\033[0;33m  当前任务：%s\033[0m\n" "${line#TASK [}"
+    elif [[ "${line}" == *"fatal:"* || "${line}" == *"UNREACHABLE"* || ( "${line}" == *"failed:"* && "${line}" != *"failed=0"* ) ]]; then
+      printf "\033[0;31m  %s\033[0m\n" "${line}"
+    elif [[ "${line}" == PLAY\ RECAP* ]]; then
+      printf "\033[1;35m  %s\033[0m\n" "${line}"
     fi
   done &
   local tail_pid=$!
@@ -640,7 +647,9 @@ _run_playbook_stage() {
   sleep 1
   kill "${tail_pid}" 2>/dev/null || true
   wait "${tail_pid}" 2>/dev/null || true
-  /bin/rm -f "${output_file}"
+  local log_file="${DELIVERY_LOG_DIR}/deploy-$(date '+%Y%m%d-%H%M%S')-${stage//[^A-Za-z0-9._-]/_}.log"
+  cp "${output_file}" "${log_file}"
+  chmod 600 "${log_file}"
   local elapsed=$(( $(date +%s) - t0 ))
   local mm=$(( elapsed / 60 ))
   local ss=$(( elapsed % 60 ))
@@ -650,8 +659,14 @@ _run_playbook_stage() {
     ok "阶段完成：${stage}  耗时 ${mm}m${ss}s"
   else
     echo ""
-    err "阶段失败：${stage}（exit=${rc}）请查看上方输出排查原因"
+    printf '\033[0;31m  ✘ 阶段失败：%s（exit=%s）\033[0m\n' "${stage}" "${rc}"
+    printf '  完整日志：%s\n' "${log_file}"
+    printf '  失败摘要：\n'
+    grep -E 'fatal:|UNREACHABLE|failed:|PLAY RECAP' "${log_file}" | tail -n 12 || true
+    /bin/rm -f "${output_file}"
+    return "${rc}"
   fi
+  /bin/rm -f "${output_file}"
 }
 
 deploy_all() {
@@ -733,6 +748,12 @@ case "${1:-}" in
   deploy)
     # 加载配置后执行全流程部署
     shift
+    for argument in "$@"; do
+      case "${argument}" in
+        --verbose) VERBOSE=1 ;;
+        *) err "未知 deploy 参数：${argument}（支持 --verbose）" ;;
+      esac
+    done
     deploy_all "$@"
     ;;
   *)
