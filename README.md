@@ -23,6 +23,22 @@
 
 本交付包已包含数据库运行时 `.deb`、管理节点 Ansible/Python 离线 wheel、`sshpass` 及全部 Playbook，clone 后不需要另外下载 Redis、RabbitMQ、MongoDB 或 MySQL 安装包。本包不包含真实 `config.env`，现场必须从模板创建并填写受控配置。
 
+### 交付包自检
+
+执行部署前，先在交付包根目录运行统一自检：
+
+```bash
+bash Automation_Script/Deploy/verify_delivery.sh
+```
+
+该检查会验证离线包 SHA256、Git LFS 指针、包目录布局、零字节文件、Shell 语法，以及模板配置中的占位符。macOS 因不提供 `dpkg-deb` 只能跳过 Debian 控制元数据检查；正式的版本、架构和依赖闭包检查必须在 Ubuntu 24.04 amd64 准备环境执行：
+
+```bash
+bash Automation_Script/Deploy/validate_deb_payloads.sh
+```
+
+现场复制 `config.env.example` 并完成所有 `group_vars` 配置后，入口脚本会自动以 configured 模式重新执行交付包自检；仍存在 `CHANGE_ME`、重复节点地址或重复主机名时会在任何远程变更前终止。
+
 ```bash
 cd Automation_Script/Deploy
 cp config.env.example config.env

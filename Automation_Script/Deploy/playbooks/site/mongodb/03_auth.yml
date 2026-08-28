@@ -25,6 +25,7 @@
       changed_when: false
       failed_when: false
       become: false
+      no_log: true
       when: inventory_hostname == mongodb_primary_ip
       run_once: true
 
@@ -44,6 +45,7 @@
             })
           "
       become: false
+      no_log: true
 
     - name: 验证 admin 账号创建成功
       ansible.builtin.command:
@@ -97,6 +99,7 @@
         group: mongodb
         mode: "0400"
       become: true
+      no_log: true
 
     - name: 验证 keyFile 权限
       ansible.builtin.stat:

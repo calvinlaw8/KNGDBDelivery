@@ -33,6 +33,7 @@
         group: rabbitmq
         mode: "0400"
       become: true
+      no_log: true
       notify: restart rabbitmq-server
 
     - name: 种子节点 - 启动 rabbitmq-server 并设为开机自启
@@ -170,14 +171,17 @@
               ansible.builtin.command: >
                 rabbitmqctl add_user {{ rabbitmq_admin_user }} {{ rabbitmq_admin_password }}
               become: true
+              no_log: true
 
             - name: 设置 administrator 标签
               ansible.builtin.command: >
                 rabbitmqctl set_user_tags {{ rabbitmq_admin_user }} administrator
               become: true
+              no_log: true
 
             - name: 授予 / vhost 全权限
               ansible.builtin.command: >
                 rabbitmqctl set_permissions -p /
                 {{ rabbitmq_admin_user }} ".*" ".*" ".*"
               become: true
+              no_log: true

@@ -17,13 +17,13 @@ required_os_major_version: "24"
 required_architecture: "x86_64"
 
 # MongoDB 副本集拓扑（hosts: 字段在 parse 阶段求值，需放在 all.yml）
-mongodb_primary_ip: "10.20.14.47"
+mongodb_primary_ip: "CHANGE_ME"
 mongodb_replica_ips:
-  - "10.20.14.48"
-  - "10.20.14.49"
+  - "CHANGE_ME"
+  - "CHANGE_ME"
 
 # MySQL 主节点 IP（hosts: 字段在 parse 阶段求值，需放在 all.yml）
-mysql_primary_ip: "10.20.14.50"
+mysql_primary_ip: "CHANGE_ME"
 
 # 注意：主机 IP→主机名映射由 init_ansible.sh（config.env）定义，
 # 写入 Ansible-01 的 /etc/hosts（# BEGIN DB_CLUSTER_HOSTS … # END DB_CLUSTER_HOSTS）

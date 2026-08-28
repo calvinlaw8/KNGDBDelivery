@@ -42,6 +42,7 @@ ensure_local_tools() {
 # ============================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.env"
+LOCAL_DELIVERY_VERIFIER="${SCRIPT_DIR}/verify_delivery.sh"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 REMOTE="${ANSIBLE_NODE_USER}@${ANSIBLE_NODE_IP}"
@@ -98,18 +99,32 @@ step1_set_hostname() {
   ok "主机名已设置为：${actual}"
 }
 
+# 比较本地与远端文件名和 SHA256，避免同名旧文件被数量检查误判为已同步。
+asset_set_matches() {
+  local local_dir="$1"
+  local remote_dir="$2"
+  local pattern="$3"
+  local local_manifest remote_manifest
+
+  local_manifest=$(find "${local_dir}" -maxdepth 1 -type f -name "${pattern}" \
+    -exec shasum -a 256 {} \; |
+    awk '{name=$NF; sub(".*/", "", name); print $1 "  " name}' | sort)
+  remote_manifest=$(ssh_run "cd '${remote_dir}' && sha256sum ${pattern} 2>/dev/null" 2>/dev/null |
+    sort || true)
+  [[ -n "${local_manifest}" && "${local_manifest}" == "${remote_manifest}" ]]
+}
+
 # Step 2: 上传离线包到管理节点
 step2_upload() {
   info "2" "上传离线包 → ${ANSIBLE_NODE_IP}:${REMOTE_PKG_DIR}"
 
   ssh_run "mkdir -p '${REMOTE_PKG_DIR}/ansible' '${REMOTE_PKG_DIR}/pip' '${REMOTE_PKG_DIR}/sshpass'"
 
-  # ── ansible whl（幂等：远端数量 >= 本地则跳过）──────────────
-  local local_whl remote_whl
+  # ── ansible whl（幂等：文件名和 SHA256 完全一致才跳过）──────
+  local local_whl
   local_whl=$(ls "${PKG_ROOT}/ansible/"*.whl 2>/dev/null | wc -l | tr -d ' ')
-  remote_whl=$(ssh_run "ls '${REMOTE_PKG_DIR}/ansible/'*.whl 2>/dev/null | wc -l | tr -d ' '" 2>/dev/null || echo 0)
-  if [[ "${remote_whl}" -ge "${local_whl}" && "${local_whl}" -gt 0 ]]; then
-    ok "ansible whl 已存在（远端 ${remote_whl} 个），跳过上传"
+  if asset_set_matches "${PKG_ROOT}/ansible" "${REMOTE_PKG_DIR}/ansible" "*.whl"; then
+    ok "ansible whl 已同步（文件名和 SHA256 一致），跳过上传"
   else
     log "上传 ansible wheel 包（${local_whl} 个）..."
     SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e \
@@ -118,12 +133,11 @@ step2_upload() {
     ok "ansible whl 上传完成（${local_whl} 个）"
   fi
 
-  # ── pip whl（幂等）──────────────────────────────────────────
-  local local_pip remote_pip
+  # ── pip whl（幂等：文件名和 SHA256 完全一致才跳过）────────
+  local local_pip
   local_pip=$(ls "${PKG_ROOT}/pip/"pip-*.whl 2>/dev/null | wc -l | tr -d ' ')
-  remote_pip=$(ssh_run "ls '${REMOTE_PKG_DIR}/pip/'pip-*.whl 2>/dev/null | wc -l | tr -d ' '" 2>/dev/null || echo 0)
-  if [[ "${remote_pip}" -ge "${local_pip}" && "${local_pip}" -gt 0 ]]; then
-    ok "pip whl 已存在（远端 ${remote_pip} 个），跳过上传"
+  if asset_set_matches "${PKG_ROOT}/pip" "${REMOTE_PKG_DIR}/pip" "pip-*.whl"; then
+    ok "pip whl 已同步（文件名和 SHA256 一致），跳过上传"
   else
     log "上传 pip wheel..."
     SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e \
@@ -494,7 +508,20 @@ validate_configuration() {
   [[ "${#DB_IPS[@]}" -eq 12 && "${#DB_HOSTNAMES[@]}" -eq 12 ]] ||
     err "DB 汇总拓扑必须包含 12 台服务器，当前为 ${#DB_IPS[@]} 个 IP、${#DB_HOSTNAMES[@]} 个主机名"
 
+  local duplicate_ip duplicate_hostname
+  duplicate_ip=$(printf '%s\n' "${DB_IPS[@]}" | sort | uniq -d | head -n 1)
+  [[ -z "${duplicate_ip}" ]] || err "数据库节点存在重复 IP：${duplicate_ip}"
+  duplicate_hostname=$(printf '%s\n' "${DB_HOSTNAMES[@]}" | sort | uniq -d | head -n 1)
+  [[ -z "${duplicate_hostname}" ]] || err "数据库节点存在重复主机名：${duplicate_hostname}"
+
   ok "配置门禁通过（无 CHANGE_ME，四组拓扑均为 3 节点）"
+}
+
+validate_delivery_assets() {
+  [[ -f "${LOCAL_DELIVERY_VERIFIER}" ]] ||
+    err "统一交付校验器不存在：${LOCAL_DELIVERY_VERIFIER}"
+  /bin/bash "${LOCAL_DELIVERY_VERIFIER}" --configured ||
+    err "统一交付校验失败；未执行任何远程操作"
 }
 
 # ============================================================
@@ -508,6 +535,7 @@ main() {
   echo "=================================================="
 
   validate_configuration
+  validate_delivery_assets
 
   log "检查本机连接工具..."
   ensure_local_tools

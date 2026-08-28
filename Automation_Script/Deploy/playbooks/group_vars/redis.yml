@@ -12,10 +12,10 @@ redis_bind: "0.0.0.0"
 redis_password: "CHANGE_ME"
 
 # 主从拓扑
-redis_master_ip: "10.20.14.41"
+redis_master_ip: "CHANGE_ME"
 redis_replicas:
-  - "10.20.14.42"
-  - "10.20.14.43"
+  - "CHANGE_ME"
+  - "CHANGE_ME"
 
 # Sentinel 配置
 sentinel_port: 26379
