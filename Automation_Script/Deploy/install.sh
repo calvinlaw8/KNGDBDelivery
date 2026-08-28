@@ -41,17 +41,34 @@ ask_secret() {
 }
 
 ask_node_group() {
-  local label="$1" prefix="$2" i
+  local label="$1" prefix="$2" i confirm
   local ip hostname
-  for i in 1 2 3; do
-    ask "${label} 节点${i} IP"; ip="${ANSWER}"
-    ask "${label} 节点${i} 主机名"; hostname="${ANSWER}"
+  while true; do
+    for i in 1 2 3; do
+      ask "${label} 节点${i} IP"; ip="${ANSWER}"
+      ask "${label} 节点${i} 主机名"; hostname="${ANSWER}"
+      case "${prefix}" in
+        REDIS) REDIS_IPS[$((i - 1))]="${ip}"; REDIS_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+        RABBITMQ) RABBITMQ_IPS[$((i - 1))]="${ip}"; RABBITMQ_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+        MONGODB) MONGODB_IPS[$((i - 1))]="${ip}"; MONGODB_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+        MYSQL) MYSQL_IPS[$((i - 1))]="${ip}"; MYSQL_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+        *) die "未知节点组：${prefix}" ;;
+      esac
+    done
+
+    info "${label} 节点配置确认"
     case "${prefix}" in
-      REDIS) REDIS_IPS[$((i - 1))]="${ip}"; REDIS_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-      RABBITMQ) RABBITMQ_IPS[$((i - 1))]="${ip}"; RABBITMQ_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-      MONGODB) MONGODB_IPS[$((i - 1))]="${ip}"; MONGODB_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-      MYSQL) MYSQL_IPS[$((i - 1))]="${ip}"; MYSQL_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-      *) die "未知节点组：${prefix}" ;;
+      REDIS) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${REDIS_IPS[$i]}" "${REDIS_HOSTNAMES[$i]}"; done ;;
+      RABBITMQ) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${RABBITMQ_IPS[$i]}" "${RABBITMQ_HOSTNAMES[$i]}"; done ;;
+      MONGODB) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${MONGODB_IPS[$i]}" "${MONGODB_HOSTNAMES[$i]}"; done ;;
+      MYSQL) for i in 0 1 2; do printf '  节点%d: %s (%s)\n' "$((i + 1))" "${MYSQL_IPS[$i]}" "${MYSQL_HOSTNAMES[$i]}"; done ;;
+    esac
+    ask "以上 ${label} 配置是否正确？输入 n 重新录入，直接回车确认" "y"
+    confirm="${ANSWER}"
+    case "${confirm}" in
+      [Nn]) warn "重新录入 ${label} 节点配置" ;;
+      [Yy]) return ;;
+      *) warn "请输入 y 确认，或输入 n 重新录入" ;;
     esac
   done
 }

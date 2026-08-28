@@ -45,7 +45,7 @@ bash Automation_Script/Deploy/validate_deb_payloads.sh
 bash Automation_Script/Deploy/install.sh
 ```
 
-向导运行过程中按提示完成信息采集即可，不需要另外编辑 `config.env`。当前测试环境需要输入 1 台 Ansible 管理节点、Redis/RabbitMQ/MongoDB/MySQL 各 3 台节点、数据库 SSH 账号密码，以及各组件运行密码和 MySQL VIP；密码通过隐藏输入并要求二次确认。
+向导运行过程中按提示完成信息采集即可，不需要另外编辑 `config.env`。当前测试环境需要输入 1 台 Ansible 管理节点、Redis/RabbitMQ/MongoDB/MySQL 各 3 台节点、数据库 SSH 账号密码，以及各组件运行密码和 MySQL VIP；密码通过隐藏输入并要求二次确认。每组三台节点输入完成后会显示配置总览；如果发现 IP 或主机名有误，输入 `n` 即可重新录入当前整组节点，直接回车或输入 `y` 确认后继续下一组。
 
 向导生成的运行时配置、凭据摘要和密码文件位于 `Automation_Script/Deploy/.runtime/`，目录权限为 `700`，敏感文件权限为 `600`，已被 Git 忽略。MongoDB keyFile 由 Playbook 自动生成并分发到各节点，不需要手工输入。安装结束后，终端会显示安装摘要和敏感凭据文件位置；请由授权人员妥善保管，不要把该目录上传或写入验收报告。
 
