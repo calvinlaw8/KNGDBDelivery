@@ -102,8 +102,8 @@ ask_management_config() {
 }
 
 ask_database_ssh_config() {
-  ask "数据库服务器 SSH 账号"; DB_USER="${ANSWER}"
-  ask_secret "数据库服务器 SSH 密码"; DB_PASS="${ANSWER}"
+  ask "数据库服务器 Linux 登录账号（用于 SSH 登录，不是数据库账号）"; DB_USER="${ANSWER}"
+  ask_secret "数据库服务器 Linux 登录密码（用于 SSH 登录）"; DB_PASS="${ANSWER}"
 }
 
 ask_component_config() {
@@ -148,7 +148,7 @@ show_overview() {
   info "部署参数总览"
   printf 'Ansible 管理节点：%s (%s)，账号：%s\n' "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_HOSTNAME}" "${ANSIBLE_NODE_USER}"
   printf '管理节点密码：已输入\n'
-  printf '数据库 SSH 账号：%s，密码：已输入\n' "${DB_USER}"
+  printf '数据库服务器 Linux 登录账号：%s，密码：已输入\n' "${DB_USER}"
   show_node_group "REDIS group" REDIS
   show_node_group "RABBITMQ group" RABBITMQ
   show_node_group "MONGODB group" MONGODB
