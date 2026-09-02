@@ -1,8 +1,10 @@
-# 交付五：离线数据库高可用自动化部署
+# eCopilot 数据库高可用部署
 
 ## 1. 项目说明
 
-交付五是面向客户内网环境的正式交付包，用于通过 Ansible 在 Ubuntu 24.04.x 服务器上离线部署四类数据库和中间件高可用组件。本包只包含正式部署资产，不包含历史包、真实配置或临时文件。项目要求版本和统一安装口径如下：
+本项目是面向客户内网环境的正式交付包，用于通过 Ansible 在 Ubuntu 24.04.x 服务器上离线部署四类数据库和中间件高可用组件。本包只包含正式部署资产，不包含历史包、真实配置或临时文件。项目要求版本和统一安装口径如下：
+
+测试环境需要从快照恢复后再做完整复现时，请按 [自动化部署测试流程.md](自动化部署测试流程.md) 执行。该流程的重置入口仅用于明确隔离的测试设备；普通 `install.sh` 和 `init_ansible.sh deploy` 不会自动重置服务器。
 
 | 服务器名称 | 操作系统 | 组件版本 | Docker 版本 |
 |---|---|---:|---|
@@ -15,7 +17,7 @@
 
 部署架构保持为 Redis 主从 + Sentinel、RabbitMQ 三节点、MongoDB `rs0` 三节点副本集、MySQL GTID 异步主从 + Keepalived VIP。
 
-> 当前交付五沿用已完成验收的正式离线载荷：正式目录共 46 个包（Redis 2、RabbitMQ 19、MongoDB 9、MySQL/Keepalived 16）。四类组件均已完成真实安装和 HA 验收；MySQL GTID 复制、Keepalived VIP、AppArmor 和 dpkg 终检通过；Keepalived 幂等重跑为 `changed=0`。完整结论见 `验收记录/交付五最终验收报告.md`。
+> 当前正式离线载荷共 46 个包（Redis 2、RabbitMQ 19、MongoDB 9、MySQL/Keepalived 16）。四类组件均已完成真实安装和 HA 验收；MySQL GTID 复制、Keepalived VIP、AppArmor 和 dpkg 终检通过；Keepalived 幂等重跑为 `changed=0`。完整结论见 `验收记录/eCopilot 最终验收报告.md`。
 
 部署节点负责执行 Ansible，数据库节点位于客户内网。安装阶段不依赖公网软件源，所有安装包均从本交付包分发。
 
@@ -45,11 +47,13 @@ bash Automation_Script/Deploy/validate_deb_payloads.sh
 bash Automation_Script/Deploy/install.sh
 ```
 
-启动时会先显示简短前置条件和变更范围，详细说明见 `Automation_Script/Deploy/部署向导说明.md`。每个组件组先输入网段前三段（例如 `10.20.14`），每个节点输入最后一段主机号（例如 `21`），也可以输入完整 IP；修改单节点时支持保留原值。部署阶段默认只显示阶段和当前 Ansible 任务，完整输出按阶段保存到 `.runtime/logs/`，需要现场排查时可使用 `bash Automation_Script/Deploy/init_ansible.sh deploy --verbose`。
+启动时会首先显示 SSH 主机指纹风险提示：首次连接目标主机时不人工验证指纹，该方式仅适用于受控部署网络，不建议在不可信网络中执行。启动菜单提供“查看部署说明”选项，阅读后会返回菜单，不会创建运行时目录或开始配置录入。每个组件组先输入该组主机 IP 地址的前三段（例如 Redis 输入 `10.20.14`，这里只输入前三段）；节点输入框中如果输入 `10`，地址就是 `10.20.14.10`，如果输入完整 IP `192.168.10.10`，则直接使用 `192.168.10.10`，不再拼接前三段。不同组件组可以使用不同网段，但 Redis、RabbitMQ、MongoDB 跨三层网络时必须具备双向路由、主机名解析和组件端口连通性；MySQL Keepalived VIP 使用 VRRP，三个 MySQL 节点与 VIP 原则上应位于同一二层广播域。修改单节点时支持保留原值。部署阶段默认只显示阶段和当前 Ansible 任务，完整输出按阶段保存到 `.runtime/logs/`，需要现场排查时可使用 `bash Automation_Script/Deploy/init_ansible.sh deploy --verbose`。
+
+整组录入节点时会先连续录入 3 个节点 IP，再设置主机名前缀。普通前缀例如 `redis-node`，节点输入 `1`、`2`、`3` 会生成 `redis-node1`、`redis-node2`、`redis-node3`；以数字结尾的前缀例如 `T-Redis-0`，节点输入 `1`、`2`、`3` 会生成 `T-Redis-01`、`T-Redis-02`、`T-Redis-03`。节点主机名输入项也可以直接输入完整主机名；留空前缀则逐台输入完整主机名。所有节点主机名必须唯一。
 
 向导运行过程中按提示完成信息采集即可，不需要另外编辑 `config.env`。当前测试环境需要输入 1 台 Ansible 管理节点、Redis/RabbitMQ/MongoDB/MySQL 各 3 台节点、数据库服务器上的 Linux 系统登录账号和密码（用于 SSH 登录服务器、上传文件及执行部署，不是 MySQL/MongoDB/Redis/RabbitMQ 数据库账号），以及各组件运行密码和 MySQL VIP；密码通过隐藏输入并要求二次确认。全部参数输入完成后会显示一次总览，并在部署前校验 IP、主机名、重复节点和 VIP 冲突。确认阶段输入 `n` 可进入修改菜单：选择数据库节点组后，还可以只修改节点 1/2/3 或整组重录；修改节点时显示原值，直接回车保留原值。管理节点、数据库服务器 SSH 登录信息和四类组件凭据也可以分别修改，输入 `0` 可取消部署。完成所选修改后会自动返回总览，只有输入 `y` 或直接回车确认后才会生成运行时配置并开始部署；输入 `q` 可在最终确认阶段取消。
 
-向导生成的运行时配置、凭据摘要和密码文件位于 `Automation_Script/Deploy/.runtime/`，目录权限为 `700`，敏感文件权限为 `600`，已被 Git 忽略。MongoDB keyFile 由 Playbook 自动生成并分发到各节点，不需要手工输入。安装结束后，终端会显示安装摘要和敏感凭据文件位置；请由授权人员妥善保管，不要把该目录上传或写入验收报告。
+向导生成的运行时配置、完整凭据清单和安装摘要位于 `Automation_Script/Deploy/.runtime/`，目录权限为 `700`，敏感文件权限为 `600`，已被 Git 忽略。完整凭据清单 `credentials.txt` 包含管理节点 SSH、数据库服务器 SSH、四类组件服务凭据、RabbitMQ Cookie、MySQL Keepalived 认证、节点 IP/主机名和 VIP；MongoDB keyFile 由 Playbook 自动生成并分发到各节点，不需要手工输入。安装结束后，终端只显示文件位置，不显示明文凭据。请仅由授权人员查看：`less Automation_Script/Deploy/.runtime/credentials.txt`。不得复制到终端、操作日志、验收报告或 Git；移交客户密码管理器后，应清理本地 `.runtime/` 并轮换已交付凭据。
 
 需要自动化或已有受控配置时，仍可使用原入口：
 
@@ -129,7 +133,7 @@ ssh root@<节点IP> 'id -u'
 在控制节点执行：
 
 ```bash
-cd /path/to/KNG-POS-DB-Delivery-Five
+cd /path/to/ecopilot-deployment
 bash Automation_Script/Deploy/init_ansible.sh
 ```
 
@@ -191,7 +195,7 @@ bash Automation_Script/Deploy/init_ansible.sh deploy
 固定版本和 SHA256 生成方式见 `版本清单与SHA256.md`。正式交付前执行并核对：
 
 ```bash
-cd /path/to/KNG-POS-DB-Delivery-Five
+cd /path/to/ecopilot-deployment
 find Automation_Script -type f -print0 | sort -z | xargs -0 shasum -a 256 > sha256-automation.txt
 find 离线安装包 -type f -print0 | sort -z | xargs -0 shasum -a 256 > sha256-packages.txt
 ```
@@ -201,5 +205,5 @@ find 离线安装包 -type f -print0 | sort -z | xargs -0 shasum -a 256 > sha256
 ## 10. 相关文档
 
 - [版本清单与SHA256.md](版本清单与SHA256.md)
-- [验收记录/交付五验收记录模板.md](验收记录/交付五验收记录模板.md)
-- [验收记录/交付五最终验收报告.md](验收记录/交付五最终验收报告.md)
+- [验收记录/eCopilot 验收记录模板.md](验收记录/eCopilot%20验收记录模板.md)
+- [验收记录/eCopilot 最终验收报告.md](验收记录/eCopilot%20最终验收报告.md)

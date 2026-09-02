@@ -13,6 +13,7 @@
 - name: RabbitMQ 配置 - Erlang Cookie 和服务启动
   hosts: rabbitmq
   gather_facts: false
+  any_errors_fatal: true
   tags: rabbitmq, rabbitmq-cookie
 
   tasks:
@@ -37,25 +38,30 @@
       notify: restart rabbitmq-server
 
     - name: 种子节点 - 启动 rabbitmq-server 并设为开机自启
-      ansible.builtin.systemd:
-        name: rabbitmq-server
-        state: started
-        enabled: true
-        daemon_reload: true
+      ansible.builtin.shell:
+        cmd: >-
+          systemctl daemon-reload &&
+          systemctl enable rabbitmq-server &&
+          systemctl start --no-block rabbitmq-server
+      changed_when: true
       when: inventory_hostname == rabbitmq_seed_node_ip
       become: true
 
-    - name: 等待种子节点 RabbitMQ 完全启动（15 秒）
-      ansible.builtin.wait_for:
-        timeout: 15
-      delegate_to: localhost
+    - name: 等待种子节点 RabbitMQ 完全启动
+      ansible.builtin.command: systemctl is-active rabbitmq-server
+      register: rmq_seed_active
+      changed_when: false
+      until: rmq_seed_active.rc == 0 and rmq_seed_active.stdout == "active"
+      retries: 72
+      delay: 5
       when: inventory_hostname == rabbitmq_seed_node_ip
+      become: true
 
     - name: 验证种子节点 rabbitmq-server 状态
-      ansible.builtin.command: systemctl is-active rabbitmq-server
-      register: rmq_active
+      ansible.builtin.command: rabbitmq-diagnostics -q ping
+      register: rmq_ping
       changed_when: false
-      failed_when: rmq_active.stdout != "active"
+      failed_when: rmq_ping.rc != 0
       when: inventory_hostname == rabbitmq_seed_node_ip
       become: true
 
@@ -72,6 +78,7 @@
   hosts: rabbitmq
   gather_facts: false
   serial: 1
+  any_errors_fatal: true
   tags: rabbitmq, rabbitmq-cluster
 
   tasks:
@@ -106,6 +113,16 @@
               ansible.builtin.command: rabbitmqctl reset
               become: true
 
+            - name: 等待种子节点 Erlang RPC 可达
+              ansible.builtin.command: >-
+                rabbitmq-diagnostics -n rabbit@{{ rabbitmq_seed_hostname }} -q ping
+              register: seed_rpc_ping
+              changed_when: false
+              until: seed_rpc_ping.rc == 0
+              retries: 36
+              delay: 5
+              become: true
+
             - name: 加入种子节点
               ansible.builtin.command: >
                 rabbitmqctl join_cluster rabbit@{{ rabbitmq_seed_hostname }}
@@ -129,6 +146,7 @@
 - name: RabbitMQ 集群 - Management Plugin 和账号管理
   hosts: rabbitmq
   gather_facts: false
+  any_errors_fatal: true
   tags: rabbitmq, rabbitmq-admin
 
   tasks:

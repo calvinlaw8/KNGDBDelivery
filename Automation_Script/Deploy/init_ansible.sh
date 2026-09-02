@@ -57,6 +57,24 @@ ssh_run() {
     ssh ${SSH_OPTS} "${REMOTE}" "$@"
 }
 
+scp_run() {
+  local attempt sshpass_file
+  sshpass_file="$(mktemp "${TMPDIR:-/tmp}/ecopilot-scp-pass.XXXXXX")"
+  chmod 600 "${sshpass_file}"
+  printf '%s\n' "${ANSIBLE_NODE_PASS}" > "${sshpass_file}"
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if sshpass -f "${sshpass_file}" scp ${SSH_OPTS} \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no "$@"; then
+      rm -f -- "${sshpass_file}"
+      return 0
+    fi
+    [[ "${attempt}" -lt 10 ]] && sleep 5
+  done
+  rm -f -- "${sshpass_file}"
+  return 1
+}
+
 # 将 sudo 密码通过 SSH 标准输入传递，避免出现在远端命令参数中。
 sudo_run() {
   local command="$1"
@@ -183,11 +201,9 @@ step2b_upload_playbooks() {
   ssh_run "mkdir -p '${REMOTE_PLAYBOOK_DIR}'"
 
   # 上传目录内容（每次覆盖，确保远端与本地同步）
-  SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e \
-    scp ${SSH_OPTS} -r "${LOCAL_PLAYBOOK_DIR}/." \
+  scp_run -r "${LOCAL_PLAYBOOK_DIR}/." \
     "${REMOTE}:${REMOTE_PLAYBOOK_DIR}/"
-  SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e \
-    scp ${SSH_OPTS} "${LOCAL_PAYLOAD_VALIDATOR}" \
+  scp_run "${LOCAL_PAYLOAD_VALIDATOR}" \
     "${REMOTE}:${REMOTE_PAYLOAD_VALIDATOR}"
 
   ssh_run "test -f '${REMOTE_PLAYBOOK_DIR}/preflights/00_preflight.yml' && \
@@ -216,7 +232,7 @@ step2c_upload_db_packages() {
   [[ -d "${LOCAL_DB_PKG_DIR}" ]] || \
     err "DB 离线包目录不存在：${LOCAL_DB_PKG_DIR}"
 
-  local sshpass_file="$(mktemp "${TMPDIR:-/tmp}/delivery5-sshpass.XXXXXX")"
+  local sshpass_file="$(mktemp "${TMPDIR:-/tmp}/ecopilot-sshpass.XXXXXX")"
   chmod 600 "${sshpass_file}"
   printf '%s\n' "${ANSIBLE_NODE_PASS}" > "${sshpass_file}"
   trap 'rm -f -- "${sshpass_file:-}"' RETURN
@@ -227,8 +243,10 @@ step2c_upload_db_packages() {
 
     [[ -d "${src}" ]] || err "本地 ${db} 正式包目录不存在：${src}"
 
-    ssh_run "mkdir -p '${dst}'"
+      ssh_run "mkdir -p '${dst}' && test -d '${dst}'" || \
+        err "管理节点离线包目录创建失败：${dst}"
     rsync -a --delete \
+        --rsync-path="mkdir -p '${dst}' && exec rsync" \
       -e "sshpass -f ${sshpass_file} ssh ${SSH_OPTS}" \
       "${src}/" "${REMOTE}:${dst}/"
     local package_count
@@ -286,7 +304,7 @@ step3b_nopasswd_ansible_node() {
   info "3b" "配置管理节点 NOPASSWD sudo"
 
   ssh_run "bash -s" <<EOF
-if printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S grep -q NOPASSWD /etc/sudoers.d/sysadmin 2>/dev/null; then
+if printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S grep -q '^sysadmin ALL=(ALL) NOPASSWD: ALL$' /etc/sudoers.d/sysadmin 2>/dev/null; then
   echo "  ✔ 已配置，跳过"
 else
   printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S sh -c \\
@@ -353,14 +371,14 @@ step6_nopasswd_sudo() {
 total_ok=0; total_skip=0; total_fail=0
 for ip in ${DB_IPS[*]}; do
   if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${DB_USER}@\${ip} \
-       "grep -q 'NOPASSWD' /etc/sudoers.d/sysadmin 2>/dev/null" 2>/dev/null; then
+      "grep -q '^${DB_USER} ALL=(ALL) NOPASSWD: ALL$' /etc/sudoers.d/${DB_USER} 2>/dev/null" 2>/dev/null; then
     echo "  ✔ \${ip} 已配置 NOPASSWD sudo，跳过"
     total_skip=\$((total_skip+1))
   else
     if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${DB_USER}@\${ip} \
          "printf '%s\n' '${DB_PASS}' | sudo -S bash -c \
-          \"echo 'sysadmin ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/sysadmin && \
-            chmod 440 /etc/sudoers.d/sysadmin\"" 2>&1; then
+          \"echo '${DB_USER} ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/${DB_USER} && \
+            chmod 440 /etc/sudoers.d/${DB_USER}\"" 2>&1; then
       echo "  ✔ \${ip} sudo 已配置（权限 440）"
       total_ok=\$((total_ok+1))
     else
@@ -381,20 +399,21 @@ step6b_configure_hosts() {
 
   # ── 1. 逐台设置主机名（SSH → sudo hostnamectl，幂等）──
   ssh_run "bash -s" <<EOF
+set -euo pipefail
 ips=(${DB_IPS[*]})
 hostnames=(${DB_HOSTNAMES[*]})
 total_ok=0; total_skip=0; total_fail=0
 for i in "\${!ips[@]}"; do
   ip="\${ips[\$i]}"
   hn="\${hostnames[\$i]}"
-  current=\$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \\
+  current=\$(ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=5 \\
                ${DB_USER}@\${ip} "hostname" 2>/dev/null || echo "")
   if [[ "\${current}" == "\${hn}" ]]; then
     echo "  ✔ \${ip} 主机名已是 \${hn}，跳过"
     total_skip=\$((total_skip+1))
   else
-    if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \\
-           ${DB_USER}@\${ip} "sudo hostnamectl set-hostname '\${hn}'" 2>&1; then
+        if ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=5 \\
+          ${DB_USER}@\${ip} "sudo -n hostnamectl set-hostname '\${hn}'" 2>&1; then
       echo "  ✔ \${ip} → \${hn}"
       total_ok=\$((total_ok+1))
     else
@@ -403,35 +422,61 @@ for i in "\${!ips[@]}"; do
     fi
   fi
 done
-echo "  → 完成：新增 \${total_ok}，跳过 \${total_skip}，失败 \${total_fail}"
+  echo "  → 完成：新增 \${total_ok}，跳过 \${total_skip}，失败 \${total_fail}"
 [ "\${total_fail}" -eq 0 ] || exit 1
-EOF
 
-  # ── 2. 向管理节点 /etc/hosts 追加 IP→主机名 映射（幂等）──
-  if ssh_run "grep -q '${DB_IPS[0]}.*${DB_HOSTNAMES[0]}' /etc/hosts 2>/dev/null"; then
-    ok "/etc/hosts DB 条目已存在，跳过"
-  else
-    {
-      printf '# BEGIN DB_CLUSTER_HOSTS\n'
-      for i in "${!DB_IPS[@]}"; do
-        printf '%-16s %s\n' "${DB_IPS[$i]}" "${DB_HOSTNAMES[$i]}"
-      done
-      printf '# END DB_CLUSTER_HOSTS\n'
-    } | ssh_run "sudo tee -a /etc/hosts > /dev/null"
-    ok "/etc/hosts 已追加 ${#DB_IPS[@]} 条 IP→主机名 映射"
-  fi
+hosts_block=\$(mktemp /tmp/db-cluster-hosts.XXXXXX)
+hosts_updated=\$(mktemp /tmp/db-cluster-hosts-updated.XXXXXX)
+trap 'rm -f "\${hosts_block}" "\${hosts_updated}"' EXIT
+{
+  printf '%s\n' '# BEGIN DB_CLUSTER_HOSTS'
+  for i in "\${!ips[@]}"; do
+    printf '%-16s %s\n' "\${ips[\$i]}" "\${hostnames[\$i]}"
+  done
+  printf '%s\n' '# END DB_CLUSTER_HOSTS'
+} > "\${hosts_block}"
+if sudo -n grep -q '^# BEGIN DB_CLUSTER_HOSTS$' /etc/hosts 2>/dev/null; then
+  awk -v replacement="\${hosts_block}" '
+  /^# BEGIN DB_CLUSTER_HOSTS$/ {
+    while ((getline line < replacement) > 0) print line
+    close(replacement)
+    inside=1
+    next
+  }
+  /^# END DB_CLUSTER_HOSTS$/ { inside=0; next }
+  !inside { print }
+' /etc/hosts > "\${hosts_updated}"
+else
+  cat /etc/hosts "\${hosts_block}" > "\${hosts_updated}"
+fi
+if ! sudo -n cmp -s /etc/hosts "\${hosts_updated}"; then
+  sudo -n cp "\${hosts_updated}" /etc/hosts
+  echo "  ✔ /etc/hosts DB 标记块已按当前拓扑更新"
+else
+  echo "  ✔ /etc/hosts DB 标记块与当前拓扑一致，跳过"
+fi
+mapped_count=\$(sudo -n awk '
+  /^# BEGIN DB_CLUSTER_HOSTS$/ { inside=1; next }
+  /^# END DB_CLUSTER_HOSTS$/ { inside=0; next }
+  inside && NF >= 2 { count++ }
+  END { print count + 0 }
+' /etc/hosts)
+if [[ "\${mapped_count}" -ne "${#DB_IPS[@]}" ]]; then
+  echo "  ✘ /etc/hosts 映射数量错误：期望 ${#DB_IPS[@]}，实际 \${mapped_count}" >&2
+  exit 1
+fi
+EOF
+  ok "DB 主机名和管理节点 /etc/hosts 配置完成"
 }
 
 # Step 7: 写入 Ansible Inventory（/etc/ansible/hosts）
 step7_inventory() {
   info "7" "写入 /etc/ansible/hosts"
 
-  if ssh_run "sudo grep -q 'db_all:children' /etc/ansible/hosts 2>/dev/null"; then
-    ok "/etc/ansible/hosts 已存在，跳过"
-    return
-  fi
-
-  # 本地构建 inventory 内容（变量在本地展开），通过管道 tee 写入远端
+  # 本地构建 inventory 内容（变量在本地展开），仅在内容变化时替换远端文件。
+  local inventory_file
+  inventory_file=$(mktemp "${TMPDIR:-/tmp}/ecopilot-inventory.XXXXXX")
+  chmod 600 "${inventory_file}"
   {
     printf '[redis]\n'
     printf '%s\n' "${REDIS_IPS[@]}"
@@ -442,9 +487,27 @@ step7_inventory() {
     printf '\n[mysql]\n'
     printf '%s\n' "${MYSQL_IPS[@]}"
     printf '\n[db_all:children]\nredis\nrabbitmq\nmongodb\nmysql\n'
-  } | ssh_run "sudo mkdir -p /etc/ansible && sudo tee /etc/ansible/hosts > /dev/null"
-
-  ok "Inventory 已写入"
+  } > "${inventory_file}"
+  SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e scp ${SSH_OPTS} \
+    "${inventory_file}" "${REMOTE}:/tmp/ecopilot-ansible-hosts"
+  local inventory_state
+  if ! inventory_state=$(ssh_run "if sudo cmp -s /tmp/ecopilot-ansible-hosts /etc/ansible/hosts 2>/dev/null; then \
+                                   state=SAME; \
+                                 else \
+                                   sudo mkdir -p /etc/ansible && sudo cp /tmp/ecopilot-ansible-hosts /etc/ansible/hosts; \
+                                   state=UPDATED; \
+                                 fi; \
+                                 sudo chown root:root /etc/ansible/hosts && sudo chmod 0644 /etc/ansible/hosts && \
+                                 sudo rm -f /tmp/ecopilot-ansible-hosts && \
+                                 ansible-inventory -i /etc/ansible/hosts --graph >/dev/null && printf '%s\\n' \"\${state}\"" ); then
+    err "Inventory 写入后无法由 sysadmin 解析，请检查 /etc/ansible/hosts"
+  fi
+  if [[ "${inventory_state}" == "UPDATED" ]]; then
+    ok "Inventory 已按当前拓扑更新"
+  else
+    ok "Inventory 与当前拓扑一致，权限和解析校验通过"
+  fi
+  rm -f -- "${inventory_file}"
 }
 
 # Step 7b: 将 group_vars 复制到 /etc/ansible/group_vars/（让子目录 playbook 也能加载变量）
@@ -462,13 +525,8 @@ step7b_group_vars() {
 step8_ansible_cfg() {
   info "8" "写入 /etc/ansible/ansible.cfg"
 
-  if ssh_run "sudo grep -q 'become_ask_pass' /etc/ansible/ansible.cfg 2>/dev/null"; then
-    ok "/etc/ansible/ansible.cfg 已存在，跳过"
-    return
-  fi
-
   ssh_run "bash -s" <<'REMOTE'
-sudo bash -c 'printf "[defaults]\ninventory = /etc/ansible/hosts\nhost_key_checking = False\nremote_user = sysadmin\n\n[privilege_escalation]\nbecome = True\nbecome_method = sudo\nbecome_user = root\nbecome_ask_pass = False\n" > /etc/ansible/ansible.cfg'
+sudo bash -c 'printf "[defaults]\ninventory = /etc/ansible/hosts\nhost_key_checking = False\nremote_user = sysadmin\nprivate_key_file = /home/sysadmin/.ssh/id_rsa\n\n[privilege_escalation]\nbecome = True\nbecome_method = sudo\nbecome_user = root\nbecome_ask_pass = False\n" > /etc/ansible/ansible.cfg && chown root:root /etc/ansible/ansible.cfg && chmod 0644 /etc/ansible/ansible.cfg'
 REMOTE
   ok "ansible.cfg 已写入"
 }
@@ -536,7 +594,9 @@ validate_configuration() {
 validate_delivery_assets() {
   [[ -f "${LOCAL_DELIVERY_VERIFIER}" ]] ||
     err "统一交付校验器不存在：${LOCAL_DELIVERY_VERIFIER}"
-  /bin/bash "${LOCAL_DELIVERY_VERIFIER}" --configured ||
+  DELIVERY_CONFIG_FILE="${CONFIG_FILE}" \
+    DELIVERY_PLAYBOOK_DIR="${LOCAL_PLAYBOOK_DIR}" \
+    /bin/bash "${LOCAL_DELIVERY_VERIFIER}" --configured ||
     err "统一交付校验失败；未执行任何远程操作"
 }
 
@@ -574,7 +634,6 @@ main() {
   step6_nopasswd_sudo
   step6b_configure_hosts
   step7_inventory
-  step7b_group_vars
   step8_ansible_cfg
   step9_ping
 
@@ -610,30 +669,35 @@ _run_playbook_stage() {
   mkdir -p "${DELIVERY_LOG_DIR}"
   chmod 700 "${DELIVERY_LOG_DIR}"
 
-  # 远端命令后台执行，本地持续读取输出并提供心跳；临时文件在阶段结束后转存为受保护日志。
-  local output_file; output_file=$(mktemp "${TMPDIR:-/tmp}/delivery5-playbook.XXXXXX")
-  SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e ssh \
-    -o StrictHostKeyChecking=no \
-    -o LogLevel=ERROR \
-    "${REMOTE}" \
-    "ANSIBLE_FORCE_COLOR=0 ${cmd}" >"${output_file}" 2>&1 &
-  local ssh_pid=$!
+  # 日志从阶段开始就落盘，现场可在另一终端实时 tail -f 查看。
+  local log_file="${DELIVERY_LOG_DIR}/deploy-$(date '+%Y%m%d-%H%M%S')-${stage//[^A-Za-z0-9._-]/_}.log"
+  : > "${log_file}"
+  chmod 600 "${log_file}"
+  printf '  实时日志：%s\n' "${log_file}"
 
-  # 详细模式保留完整输出；默认模式只保留 PLAY、TASK、失败和汇总行。
-  tail -f "${output_file}" 2>/dev/null | while IFS= read -r line; do
-    if [[ "${VERBOSE}" -eq 1 ]]; then
-      printf "  %s\n" "${line}"
-    elif [[ "${line}" == PLAY\ * ]]; then
-      printf "\033[1;36m  %s\033[0m\n" "${line}"
-    elif [[ "${line}" == TASK\ * ]]; then
-      printf "\033[0;33m  当前任务：%s\033[0m\n" "${line#TASK [}"
-    elif [[ "${line}" == *"fatal:"* || "${line}" == *"UNREACHABLE"* || ( "${line}" == *"failed:"* && "${line}" != *"failed=0"* ) ]]; then
-      printf "\033[0;31m  %s\033[0m\n" "${line}"
-    elif [[ "${line}" == PLAY\ RECAP* ]]; then
-      printf "\033[1;35m  %s\033[0m\n" "${line}"
-    fi
-  done &
-  local tail_pid=$!
+  # 远端命令后台执行；仅对 SSH 连接错误 255 重试，避免重跑已启动的 Playbook。
+  (
+    local attempt rc
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+      if ! SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e ssh \
+        -o StrictHostKeyChecking=no \
+        -o LogLevel=ERROR \
+        "${REMOTE}" true; then
+        rc=255
+      else
+        SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e ssh \
+          -o StrictHostKeyChecking=no \
+          -o LogLevel=ERROR \
+          "${REMOTE}" \
+          "ANSIBLE_FORCE_COLOR=0 ${cmd}"
+        rc=$?
+      fi
+      [[ "${rc}" -ne 255 ]] && exit "${rc}"
+      [[ "${attempt}" -lt 10 ]] && sleep 5
+    done
+    exit "${rc}"
+  ) >"${log_file}" 2>&1 &
+  local ssh_pid=$!
 
   while kill -0 "${ssh_pid}" 2>/dev/null; do
     local elapsed_now=$(( $(date +%s) - t0 ))
@@ -644,17 +708,16 @@ _run_playbook_stage() {
 
   local rc=0
   wait "${ssh_pid}" || rc=$?
-  sleep 1
-  kill "${tail_pid}" 2>/dev/null || true
-  wait "${tail_pid}" 2>/dev/null || true
-  local log_file="${DELIVERY_LOG_DIR}/deploy-$(date '+%Y%m%d-%H%M%S')-${stage//[^A-Za-z0-9._-]/_}.log"
-  cp "${output_file}" "${log_file}"
-  chmod 600 "${log_file}"
   local elapsed=$(( $(date +%s) - t0 ))
   local mm=$(( elapsed / 60 ))
   local ss=$(( elapsed % 60 ))
 
   if [[ ${rc} -eq 0 ]]; then
+    if [[ "${VERBOSE}" -eq 1 ]]; then
+      sed 's/^/  /' "${log_file}"
+    else
+      grep -E '^(PLAY |TASK |PLAY RECAP|fatal:|UNREACHABLE|.*failed:|.*failed=)' "${log_file}" || true
+    fi
     echo ""
     ok "阶段完成：${stage}  耗时 ${mm}m${ss}s"
   else
@@ -663,10 +726,8 @@ _run_playbook_stage() {
     printf '  完整日志：%s\n' "${log_file}"
     printf '  失败摘要：\n'
     grep -E 'fatal:|UNREACHABLE|failed:|PLAY RECAP' "${log_file}" | tail -n 12 || true
-    /bin/rm -f "${output_file}"
     return "${rc}"
   fi
-  /bin/rm -f "${output_file}"
 }
 
 deploy_all() {
@@ -722,6 +783,11 @@ deploy_all() {
     "MySQL 8.4.11 GTID 主从 + Keepalived VIP" \
     "mysql" \
     "~/playbooks/site/site.yml"
+
+  _run_playbook_stage \
+    "部署后终检（dpkg 审计）" \
+    "" \
+    "~/playbooks/preflights/02_postflight.yml"
 
   local total_elapsed=$(( $(date +%s) - TOTAL_T0 ))
   local tmm=$(( total_elapsed / 60 ))

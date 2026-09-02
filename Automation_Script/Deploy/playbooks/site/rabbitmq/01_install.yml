@@ -25,6 +25,28 @@
         mode: "0755"
       become: true
 
+    - name: 请求停止旧 RabbitMQ 服务（重新初始化节点状态）
+      ansible.builtin.command: systemctl stop --no-block rabbitmq-server.service
+      become: true
+      changed_when: false
+      failed_when: false
+
+    - name: 等待旧 RabbitMQ 服务停止
+      ansible.builtin.command: systemctl is-active rabbitmq-server.service
+      register: old_rabbitmq_status
+      changed_when: false
+      failed_when: false
+      until: old_rabbitmq_status.rc != 0
+      retries: 30
+      delay: 2
+      become: true
+
+    - name: 清理旧 RabbitMQ 节点状态
+      ansible.builtin.file:
+        path: /var/lib/rabbitmq/mnesia
+        state: absent
+      become: true
+
     - name: 分发所有 .deb 包
       ansible.builtin.copy:
         src: "{{ rabbitmq_pkg_dir }}/"
@@ -61,11 +83,43 @@
       changed_when: false
       become: true
 
+    - name: 等待 dpkg 前端锁释放
+      ansible.builtin.shell:
+        cmd: >-
+          if command -v fuser >/dev/null 2>&1 &&
+             fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+            exit 1
+          fi
+      register: dpkg_lock_wait
+      changed_when: false
+      until: dpkg_lock_wait.rc == 0
+      retries: 60
+      delay: 5
+      become: true
+
     - name: 通过本地包缓存安装 RabbitMQ（不下载、不删除）
       block:
         - name: 执行离线 dpkg 安装
           ansible.builtin.shell:
-            cmd: dpkg -i /tmp/rabbitmq/*.deb
+            cmd: |
+              for attempt in $(seq 1 60); do
+                if command -v fuser >/dev/null 2>&1 &&
+                   fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+                  sleep 5
+                  continue
+                fi
+                dpkg -i /tmp/rabbitmq/*.deb
+                rc=$?
+                if [ "$rc" -eq 0 ]; then
+                  exit 0
+                fi
+                if [ "$rc" -ne 2 ] ||
+                   ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+                  exit "$rc"
+                fi
+                sleep 5
+              done
+              exit 2
           register: dpkg_result
           changed_when: "'Setting up rabbitmq-server' in dpkg_result.stdout"
           become: true

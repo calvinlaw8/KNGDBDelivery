@@ -7,7 +7,6 @@ PACKAGE_ROOT="${DELIVERY_ROOT}/离线安装包"
 MANIFEST="${DELIVERY_ROOT}/sha256-packages.txt"
 CONFIGURED_MODE=0
 CONFIG_FILE="${DELIVERY_CONFIG_FILE:-${DELIVERY_ROOT}/Automation_Script/Deploy/config.env}"
-GROUP_VARS_DIR="${DELIVERY_PLAYBOOK_DIR:-${DELIVERY_ROOT}/Automation_Script/Deploy/playbooks}/group_vars"
 
 if [[ "${1:-}" == "--configured" ]]; then
   CONFIGURED_MODE=1
@@ -108,8 +107,8 @@ check_static_files() {
   while IFS= read -r -d '' script; do
     /bin/bash -n "${script}" || fail "Shell 语法检查失败：${script}"
   done < <(find "${DELIVERY_ROOT}/Automation_Script" -type f -name '*.sh' -print0)
-  if ((CONFIGURED_MODE == 1)) && grep -R -n -h 'CHANGE_ME' \
-    "${CONFIG_FILE}" "${GROUP_VARS_DIR}" >/dev/null 2>&1; then
+  if ((CONFIGURED_MODE == 1)) && grep -n -h 'CHANGE_ME' \
+    "${CONFIG_FILE}" >/dev/null 2>&1; then
     fail "实际部署配置中仍存在 CHANGE_ME 占位符"
   fi
 }

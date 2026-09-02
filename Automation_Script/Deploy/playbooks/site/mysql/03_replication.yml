@@ -18,7 +18,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -e "SET GLOBAL read_only=OFF; SET GLOBAL super_read_only=OFF;"
@@ -32,7 +34,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -e "SELECT COUNT(*) FROM mysql.user WHERE User='{{ mysql_repl_user }}';"
@@ -52,7 +56,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -e "
@@ -69,7 +75,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -e "SELECT COUNT(*) FROM mysql.user WHERE User='root' AND Host='%';"
@@ -89,7 +97,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -e "
@@ -106,7 +116,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -NBe "SELECT @@gtid_executed;"
@@ -133,26 +145,30 @@
     - name: Replica 节点 - 配置并启动 GTID 复制
       when: inventory_hostname != mysql_primary_ip
       block:
-        - name: 检查复制线程是否已运行
+        - name: 读取复制状态
           ansible.builtin.shell:
             cmd: >
               {{ mysql_client_bin }}
-              --socket=/tmp/mysql.sock
+              --protocol=TCP
+              --host=127.0.0.1
+              --port={{ mysql_port }}
               -u root
               -p"{{ mysql_root_password }}"
               -e "SHOW REPLICA STATUS\G"
-              | grep -c "Replica_IO_Running: Yes" || true
-          register: repl_running
+          register: repl_status
           changed_when: false
+          failed_when: repl_status.rc != 0
           become: true
           no_log: true
 
         - name: 配置 CHANGE REPLICATION SOURCE（若未启动）
-          when: repl_running.stdout | trim | int == 0
+          when: "'Replica_IO_Running: Yes' not in repl_status.stdout"
           ansible.builtin.shell:
             cmd: >
               {{ mysql_client_bin }}
-              --socket=/tmp/mysql.sock
+              --protocol=TCP
+              --host=127.0.0.1
+              --port={{ mysql_port }}
               -u root
               -p"{{ mysql_root_password }}"
               -e "
@@ -174,7 +190,9 @@
           ansible.builtin.shell:
             cmd: >
               {{ mysql_client_bin }}
-              --socket=/tmp/mysql.sock
+              --protocol=TCP
+              --host=127.0.0.1
+              --port={{ mysql_port }}
               -u root
               -p"{{ mysql_root_password }}"
               -e "SET GLOBAL read_only=ON;"
@@ -191,14 +209,15 @@
           ansible.builtin.shell:
             cmd: >
               {{ mysql_client_bin }}
-              --socket=/tmp/mysql.sock
+              --protocol=TCP
+              --host=127.0.0.1
+              --port={{ mysql_port }}
               -u root
               -p"{{ mysql_root_password }}"
               -e "SHOW REPLICA STATUS\G"
-              | grep "Replica_IO_Running" | awk '{print $2}'
           register: io_running
           changed_when: false
-          failed_when: io_running.stdout | trim != "Yes"
+          failed_when: "'Replica_IO_Running: Yes' not in io_running.stdout"
           become: true
           no_log: true
 
@@ -206,19 +225,19 @@
           ansible.builtin.shell:
             cmd: >
               {{ mysql_client_bin }}
-              --socket=/tmp/mysql.sock
+              --protocol=TCP
+              --host=127.0.0.1
+              --port={{ mysql_port }}
               -u root
               -p"{{ mysql_root_password }}"
               -e "SHOW REPLICA STATUS\G"
-              | grep "Replica_SQL_Running:" | head -1 | awk '{print $2}'
           register: sql_running
           changed_when: false
-          failed_when: sql_running.stdout | trim != "Yes"
+          failed_when: "'Replica_SQL_Running: Yes' not in sql_running.stdout"
           become: true
           no_log: true
 
         - name: 显示 Replica 复制状态
           ansible.builtin.debug:
             msg: >-
-              {{ inventory_hostname }}: IO={{ io_running.stdout | trim }},
-              SQL={{ sql_running.stdout | trim }} ✅
+              {{ inventory_hostname }}: IO/SQL 线程均为 Yes ✅

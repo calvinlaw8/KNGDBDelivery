@@ -44,7 +44,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -e "SHOW REPLICA STATUS\G"
@@ -60,7 +62,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -e "SHOW REPLICA STATUS\G"
@@ -70,6 +74,38 @@
       failed_when: sql_running.stdout | trim != "Yes"
       become: true
       no_log: true
+
+    - name: 严格验证 Replica 错误与复制延迟
+      when: inventory_hostname != mysql_primary_ip
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }} --protocol=TCP --host=127.0.0.1
+          --port={{ mysql_port }} -u root -p"{{ mysql_root_password }}"
+          -e "SHOW REPLICA STATUS\G" |
+          awk -v threshold={{ mysql_replication_max_delay_seconds }} '
+          function value(line) { sub(/^[^:]*:[[:space:]]*/, "", line); gsub(/[[:space:]\r]/, "", line); return line }
+          /^[[:space:]]*Replica_IO_Running:/{io=value($0)}
+          /^[[:space:]]*Replica_SQL_Running:/{sql=value($0)}
+          /^[[:space:]]*Last_IO_Error:/{ioerr=value($0)}
+          /^[[:space:]]*Last_SQL_Error:/{sqlerr=value($0)}
+          /^[[:space:]]*Seconds_Behind_Source:/{delay=value($0)}
+          END {
+            if (io == "Yes" && sql == "Yes" && delay ~ /^[0-9]+$/ &&
+                delay + 0 <= threshold && (ioerr == "" || ioerr == "NULL") &&
+                (sqlerr == "" || sqlerr == "NULL")) print "OK";
+            else exit 1;
+          }'
+      register: replica_health
+      changed_when: false
+      failed_when: >-
+        replica_health.rc != 0 or replica_health.stdout | trim != "OK"
+      become: true
+      no_log: true
+
+    - name: 输出 Replica 健康摘要
+      when: inventory_hostname != mysql_primary_ip
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}：复制线程、错误字段和延迟断言通过"
 
     - name: 显示 Replica 复制线程状态
       when: inventory_hostname != mysql_primary_ip
@@ -84,7 +120,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -e "SHOW REPLICA STATUS\G"
@@ -101,7 +139,7 @@
 
 
 - name: MySQL VIP 可达性验证（从 Ansible-01 验证）
-  hosts: localhost
+  hosts: mysql
   gather_facts: false
   tags: mysql, mysql-verify
   vars_files:
@@ -118,6 +156,19 @@
       ansible.builtin.debug:
         msg: "VIP {{ mysql_vip }} 可达 ✅（{{ vip_ping.stdout_lines[-1] }}）"
 
+    - name: 通过 VIP 执行 TCP SQL 并确认 Primary 角色
+      when: inventory_hostname == mysql_primary_ip
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }} --protocol=TCP --host={{ mysql_vip }}
+          --port={{ mysql_port }} -u root -p"{{ mysql_root_password }}"
+          -NBe "SELECT 1, @@global.read_only;"
+      register: vip_sql
+      changed_when: false
+      failed_when: vip_sql.rc != 0 or vip_sql.stdout | trim != "1\t0"
+      become: true
+      no_log: true
+
 
 - name: MySQL 验证通过摘要（Primary 节点）
   hosts: mysql
@@ -129,7 +180,9 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
           -p"{{ mysql_root_password }}"
           -NBe "SELECT @@gtid_executed;"

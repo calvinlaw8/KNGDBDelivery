@@ -4,12 +4,14 @@
 
 mysql_version: "8.4.11"
 mysql_port: 3306
+mysql_replication_max_delay_seconds: 30
 
-# 安装路径
-mysql_base_dir: "/opt/mysql"
+# Debian 包安装路径
+mysql_base_dir: "/usr"
 mysql_data_dir: "/data/mysql"
 mysql_log_dir: "/var/log/mysql"
 mysql_config_file: "/etc/mysql/my.cnf"
+mysql_socket: "/run/mysqld/mysqld.sock"
 mysql_pkg_dir: "/home/sysadmin/pkg/mysql"
 mysql_server_package: "mysql-community-server"
 mysql_client_bin: "/usr/bin/mysql"

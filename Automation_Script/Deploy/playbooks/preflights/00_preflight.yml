@@ -32,7 +32,7 @@
           - ansible_distribution_major_version == required_os_major_version
           - ansible_architecture == required_architecture
         fail_msg: >-
-          {{ inventory_hostname }} 不满足交付五基线：需要
+          {{ inventory_hostname }} 不满足 eCopilot 部署基线：需要
           {{ required_os_distribution }} {{ required_os_major_version }} x86_64，实际为
           {{ ansible_distribution }} {{ ansible_distribution_version }} {{ ansible_architecture }}。
         success_msg: "{{ inventory_hostname }} 操作系统基线通过"
@@ -63,7 +63,7 @@
         that: dpkg_audit.stdout | trim == ""
         fail_msg: >-
           {{ inventory_hostname }} 存在 dpkg 未完成或损坏状态：
-          {{ dpkg_audit.stdout }}。请先修复后再执行交付五部署，禁止使用 --force-depends 绕过。
+          {{ dpkg_audit.stdout }}。请先修复后再执行 eCopilot 部署，禁止使用 --force-depends 绕过。
         success_msg: "{{ inventory_hostname }} dpkg 数据库健康"
 
 

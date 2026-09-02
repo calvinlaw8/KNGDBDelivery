@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 交付五一键部署向导：生成本机运行时配置后调用现有 Ansible 入口。
+# eCopilot 数据库高可用部署向导：生成本机运行时配置后调用离线 Ansible 入口。
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -60,9 +61,9 @@ ask_subnet_prefix() {
   local label="$1" prefix="$2" current_prefix="${3:-}" subnet
   while true; do
     if [[ -n "${current_prefix}" ]]; then
-      ask "${label} 网段前三段（例如 10.20.14）" "${current_prefix}"
+      ask "${label} 主机 IP 地址前三段（例如 10.20.14；后续输入 10 得到 ${current_prefix}.10，输入 192.168.10.10 则直接使用该完整 IP；当前 ${current_prefix}）" "${current_prefix}"
     else
-      ask "${label} 网段前三段（例如 10.20.14）"
+      ask "${label} 主机 IP 地址前三段（例如 10.20.14；后续输入 10 得到 10.20.14.10，输入 192.168.10.10 则直接使用该完整 IP）"
     fi
     subnet="${ANSWER}"
     if is_valid_subnet_prefix "${subnet}"; then
@@ -75,7 +76,7 @@ ask_subnet_prefix() {
       esac
       return
     fi
-    warn "网段格式无效，请输入前三段，例如 10.20.14"
+    warn "IP 前三段格式无效，请输入例如 10.20.14"
     current_prefix=""
   done
 }
@@ -83,7 +84,7 @@ ask_subnet_prefix() {
 ask_node_ip() {
   local label="$1" prefix="$2" index="$3" current_ip="$4" subnet="$5" input
   while true; do
-    ask "${label} 节点$((index + 1)) 主机号或完整 IP（当前 ${current_ip}）" "${current_ip}"
+    ask "${label} 节点$((index + 1)) 主机号或完整 IP（例如输入 10，则地址为 ${subnet}.10；输入 192.168.10.10，则地址为 192.168.10.10；当前 ${current_ip}）" "${current_ip}"
     input="${ANSWER}"
     if is_valid_host_number "${input}"; then
       ANSWER="${subnet}.${input}"
@@ -97,8 +98,13 @@ ask_node_ip() {
   done
 }
 
+hostname_for_index() {
+  local hostname_prefix="$1" index="$2"
+  printf '%s%s' "${hostname_prefix}" "${index}"
+}
+
 ask_node_group() {
-  local label="$1" prefix="$2" i subnet ip hostname
+  local label="$1" prefix="$2" i subnet ip hostname hostname_prefix
   case "${prefix}" in
     REDIS) ask_subnet_prefix "${label}" "${prefix}" "${REDIS_SUBNET_PREFIX:-}" ;;
     RABBITMQ) ask_subnet_prefix "${label}" "${prefix}" "${RABBITMQ_SUBNET_PREFIX:-}" ;;
@@ -114,12 +120,37 @@ ask_node_group() {
   esac
   for i in 1 2 3; do
     ask_node_ip "${label}" "${prefix}" "$((i - 1))" "" "${subnet}"; ip="${ANSWER}"
-    ask "${label} 节点${i} 主机名"; hostname="${ANSWER}"
     case "${prefix}" in
-      REDIS) REDIS_IPS[$((i - 1))]="${ip}"; REDIS_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-      RABBITMQ) RABBITMQ_IPS[$((i - 1))]="${ip}"; RABBITMQ_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-      MONGODB) MONGODB_IPS[$((i - 1))]="${ip}"; MONGODB_HOSTNAMES[$((i - 1))]="${hostname}" ;;
-      MYSQL) MYSQL_IPS[$((i - 1))]="${ip}"; MYSQL_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+      REDIS) REDIS_IPS[$((i - 1))]="${ip}" ;;
+      RABBITMQ) RABBITMQ_IPS[$((i - 1))]="${ip}" ;;
+      MONGODB) MONGODB_IPS[$((i - 1))]="${ip}" ;;
+      MYSQL) MYSQL_IPS[$((i - 1))]="${ip}" ;;
+      *) die "未知节点组：${prefix}" ;;
+    esac
+  done
+  while true; do
+    read -r -p "${label} 主机名前缀（例如 db-node，节点输入 1/2/3 将生成 db-node1/2/3；如输入 T-Redis-0，节点输入 1/2/3 将生成 T-Redis-01/02/03；留空则逐台输入完整主机名）: " hostname_prefix
+    [[ -z "${hostname_prefix}" ]] && break
+    if is_valid_hostname "$(hostname_for_index "${hostname_prefix}" "1")"; then
+      break
+    fi
+    warn "主机名前缀无效，请使用字母、数字、连字符或下划线"
+  done
+  for i in 1 2 3; do
+    if [[ -n "${hostname_prefix}" ]]; then
+      ask "${label} 节点${i} 主机名（可输入完整主机名，输入数字则使用默认名称）" "$(hostname_for_index "${hostname_prefix}" "${i}")"
+    else
+      ask "${label} 节点${i} 主机名"
+    fi
+    hostname="${ANSWER}"
+    if [[ -n "${hostname_prefix}" && "${hostname}" =~ ^[0-9]+$ ]]; then
+      hostname="$(hostname_for_index "${hostname_prefix}" "${hostname}")"
+    fi
+    case "${prefix}" in
+      REDIS) REDIS_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+      RABBITMQ) RABBITMQ_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+      MONGODB) MONGODB_HOSTNAMES[$((i - 1))]="${hostname}" ;;
+      MYSQL) MYSQL_HOSTNAMES[$((i - 1))]="${hostname}" ;;
       *) die "未知节点组：${prefix}" ;;
     esac
   done
@@ -172,7 +203,13 @@ ask_management_config() {
 }
 
 ask_database_ssh_config() {
-  ask "数据库服务器 Linux 登录账号（用于 SSH 登录，不是数据库账号）"; DB_USER="${ANSWER}"
+  while true; do
+    ask "数据库服务器 Linux 登录账号（用于 SSH 登录，不是数据库账号）"; DB_USER="${ANSWER}"
+    if is_valid_linux_username "${DB_USER}"; then
+      break
+    fi
+    warn "账号名无效，请输入合法 Linux 用户名（小写字母、数字、下划线或连字符）"
+  done
   ask_secret "数据库服务器 Linux 登录密码（用于 SSH 登录）"; DB_PASS="${ANSWER}"
 }
 
@@ -243,6 +280,10 @@ is_valid_ip() {
   for part in "${parts[@]}"; do
     ((10#${part} <= 255)) || return 1
   done
+}
+
+is_valid_linux_username() {
+  [[ "$1" =~ ^[a-z_][a-z0-9_-]*\$?$ ]]
 }
 
 is_valid_hostname() {
@@ -343,14 +384,17 @@ collect_all_inputs() {
 }
 
 confirm_overview() {
-  local answer
+  local answer validation_round=0
   while true; do
     show_overview
+    validation_round=$((validation_round + 1))
+    info "正在进行第 ${validation_round} 次配置校验"
     if ! validate_configuration; then
-      warn "参数校验未通过，请先修改错误配置"
+      warn "配置校验未通过，请先修改错误配置；修正后将重新校验"
       reset_configuration
       continue
     fi
+    printf '\033[0;32m✓ 配置校验通过：IP、主机名、重复项和 MySQL VIP 均符合要求\033[0m\n'
     ask "确认以上配置并开始部署？[y] 开始部署，[n] 返回修改菜单，[q] 取消" "y"
     answer="${ANSWER}"
     case "${answer}" in
@@ -408,34 +452,60 @@ write_runtime_config() {
   chmod 600 "${CONFIG_FILE}"
 }
 
+show_deployment_guide() {
+  local guide_file="${SCRIPT_DIR}/部署向导说明.md"
+  if [[ ! -f "${guide_file}" ]]; then
+    warn "找不到部署说明：${guide_file}"
+    return
+  fi
+  if command -v less >/dev/null 2>&1; then
+    less "${guide_file}"
+  elif command -v more >/dev/null 2>&1; then
+    more "${guide_file}"
+  else
+    cat "${guide_file}"
+  fi
+}
+
 main() {
   [[ -t 0 && -t 1 ]] || die "install.sh 需要在交互式终端运行；请直接执行 bash Automation_Script/Deploy/install.sh"
-  mkdir -p "${RUNTIME_PLAYBOOK_DIR}"
-  chmod 700 "${RUNTIME_DIR}"
-  cp -R "${SCRIPT_DIR}/playbooks/preflights" "${RUNTIME_PLAYBOOK_DIR}/"
-  cp -R "${SCRIPT_DIR}/playbooks/site" "${RUNTIME_PLAYBOOK_DIR}/"
-  mkdir -p "${RUNTIME_PLAYBOOK_DIR}/group_vars"
-  cp "${SCRIPT_DIR}/playbooks/group_vars/"*.yml "${RUNTIME_PLAYBOOK_DIR}/group_vars/"
 
-  info "交付五一键部署向导"
+  info "eCopilot 数据库高可用部署向导"
+  warn "安全提示：本向导首次连接目标主机时不人工验证 SSH 主机指纹。"
+  warn "本方式仅适用于受控部署网络。"
+  warn "不建议在不可信网络中执行。"
+  printf '\n'
   printf '本向导将配置 Redis、RabbitMQ、MongoDB、MySQL 四套三节点服务，并通过离线 Ansible 完成部署。\n'
+  printf '部署版本：Redis 8.2.8；RabbitMQ 4.2.9 + Erlang 27.3.4.16-1；MongoDB 8.2.12；MySQL 8.4.11。\n'
+  printf '部署架构：Redis 主从 + Sentinel、RabbitMQ 三节点、MongoDB rs0 三节点副本集、MySQL GTID 异步主从 + Keepalived VIP。\n'
   printf '部署会修改目标服务器的主机名、/etc/hosts、软件和服务配置。预计耗时约 10-30 分钟。\n'
   printf '前置条件：Ubuntu 24.04.x amd64、SSH 可达、Linux 账号可 sudo、交付包离线资产完整。\n'
-  printf '每个组件组先输入网段前三段（例如 10.20.14），节点再输入最后一段主机号。\n'
-  printf '详细说明：%s\n项目文档：%s\n' "${SCRIPT_DIR}/部署向导说明.md" "${PROJECT_ROOT}/README.md"
+  printf '同组节点同一网段时，可先输入网段前三段（例如 10.20.14），再输入主机号。\n'
+  printf '节点位于不同网段时，请为每个节点直接输入完整 IPv4 地址。\n'
+  printf '查看部署说明：启动菜单中选择“查看部署说明”，阅读结束后返回菜单。\n'
   warn "密码和 Cookie 只保存到 ${RUNTIME_DIR}，不会写入 Git 或普通操作日志。"
-  printf '\n1. 开始录入配置\n0. 退出向导\n'
   local start_choice
-  ask "请选择操作（0-1）" "1"
-  start_choice="${ANSWER}"
-  case "${start_choice}" in
-    1) ;;
-    0) cancel_deployment ;;
-    *) die "请输入 0 或 1" ;;
-  esac
+  while true; do
+    printf '\n1. 开始录入配置\n2. 查看部署说明\n0. 退出向导\n'
+    ask "请选择操作（0-2）" "1"
+    start_choice="${ANSWER}"
+    case "${start_choice}" in
+      1) break ;;
+      2) show_deployment_guide ;;
+      0) cancel_deployment ;;
+      *) warn "请输入 0、1 或 2" ;;
+    esac
+  done
 
   collect_all_inputs
   confirm_overview
+
+  rm -rf "${RUNTIME_DIR}"
+  mkdir -p "${RUNTIME_PLAYBOOK_DIR}/group_vars"
+  chmod 700 "${RUNTIME_DIR}"
+  cp -R "${SCRIPT_DIR}/playbooks/preflights" "${RUNTIME_PLAYBOOK_DIR}/"
+  cp -R "${SCRIPT_DIR}/playbooks/site" "${RUNTIME_PLAYBOOK_DIR}/"
+  cp "${SCRIPT_DIR}/playbooks/group_vars/"*.yml "${RUNTIME_PLAYBOOK_DIR}/group_vars/"
 
   write_runtime_config
   yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/all.yml" mongodb_primary_ip "${MONGODB_IPS[0]}"
@@ -457,17 +527,35 @@ main() {
   yaml_block "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_nodes "$(printf 'mysql_nodes:\n  - ip: \"%s\"\n    hostname: \"%s\"\n    server_id: 1\n    role: \"primary\"\n    keepalived_priority: 100\n  - ip: \"%s\"\n    hostname: \"%s\"\n    server_id: 2\n    role: \"replica\"\n    keepalived_priority: 90\n  - ip: \"%s\"\n    hostname: \"%s\"\n    server_id: 3\n    role: \"replica\"\n    keepalived_priority: 80' "${MYSQL_IPS[0]}" "${MYSQL_HOSTNAMES[0]}" "${MYSQL_IPS[1]}" "${MYSQL_HOSTNAMES[1]}" "${MYSQL_IPS[2]}" "${MYSQL_HOSTNAMES[2]}")"
 
   {
-    printf '交付五安装摘要\n生成时间：%s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'eCopilot 数据库高可用部署摘要\n生成时间：%s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
     printf 'Ansible 管理节点：%s (%s)\n' "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_HOSTNAME}"
     printf 'Redis：%s\nRabbitMQ：%s\nMongoDB：%s\nMySQL：%s\n' "${REDIS_IPS[*]}" "${RABBITMQ_IPS[*]}" "${MONGODB_IPS[*]}" "${MYSQL_IPS[*]}"
     printf '\nMySQL VIP：%s\nMongoDB keyFile：部署后各节点 %s\n' "${mysql_vip}" "/etc/mongodb-keyfile"
     printf '\n敏感凭据位置：%s（权限 600）\n运行时配置位置：%s（目录权限 700）\n' "${CREDENTIALS_FILE}" "${CONFIG_FILE}"
   } > "${SUMMARY_FILE}"
   chmod 600 "${SUMMARY_FILE}"
+  credentials_tmp="${CREDENTIALS_FILE}.tmp.$$"
   {
-    printf 'Redis password=%s\nRabbitMQ admin password=%s\nRabbitMQ Erlang Cookie=%s\nMongoDB admin password=%s\nMySQL root password=%s\nMySQL replication password=%s\nKeepalived auth_pass=%s\n' \
-      "${redis_password}" "${rabbitmq_admin_password}" "${rabbitmq_cookie}" "${mongodb_admin_password}" "${mysql_root_password}" "${mysql_repl_password}" "${keepalived_auth_pass}"
-  } > "${CREDENTIALS_FILE}"
+    printf 'eCopilot 数据库高可用部署凭据清单\n生成时间：%s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf '[Ansible 管理节点]\nIP=%s\n主机名=%s\n账号=%s\n密码=%s\n\n' \
+      "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_HOSTNAME}" "${ANSIBLE_NODE_USER}" "${ANSIBLE_NODE_PASS}"
+    printf '[数据库服务器 SSH]\n账号=%s\n密码=%s\n\n' "${DB_USER}" "${DB_PASS}"
+    printf '[Redis 节点]\n'
+    for i in 0 1 2; do printf '节点%d IP=%s 主机名=%s\n' "$((i + 1))" "${REDIS_IPS[$i]}" "${REDIS_HOSTNAMES[$i]}"; done
+    printf '服务密码=%s\n\n' "${redis_password}"
+    printf '[RabbitMQ 节点]\n'
+    for i in 0 1 2; do printf '节点%d IP=%s 主机名=%s\n' "$((i + 1))" "${RABBITMQ_IPS[$i]}" "${RABBITMQ_HOSTNAMES[$i]}"; done
+    printf '节点间通信 Cookie=%s\n管理员服务密码=%s\n\n' "${rabbitmq_cookie}" "${rabbitmq_admin_password}"
+    printf '[MongoDB 节点]\n'
+    for i in 0 1 2; do printf '节点%d IP=%s 主机名=%s\n' "$((i + 1))" "${MONGODB_IPS[$i]}" "${MONGODB_HOSTNAMES[$i]}"; done
+    printf 'admin 服务密码=%s\n\n' "${mongodb_admin_password}"
+    printf '[MySQL 节点]\n'
+    for i in 0 1 2; do printf '节点%d IP=%s 主机名=%s\n' "$((i + 1))" "${MYSQL_IPS[$i]}" "${MYSQL_HOSTNAMES[$i]}"; done
+    printf 'root 数据库密码=%s\nreplication 复制账号密码=%s\nKeepalived VIP=%s\nKeepalived 节点通信认证密码=%s\n' \
+      "${mysql_root_password}" "${mysql_repl_password}" "${mysql_vip}" "${keepalived_auth_pass}"
+  } > "${credentials_tmp}"
+  chmod 600 "${credentials_tmp}"
+  mv "${credentials_tmp}" "${CREDENTIALS_FILE}"
   chmod 600 "${CREDENTIALS_FILE}"
 
   if [[ "${INSTALL_DRY_RUN:-0}" == "1" ]]; then
