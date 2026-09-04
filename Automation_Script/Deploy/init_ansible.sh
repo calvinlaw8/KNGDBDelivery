@@ -48,6 +48,8 @@ DELIVERY_LOG_DIR="${DELIVERY_LOG_DIR:-$(cd "$(dirname "${CONFIG_FILE}")" && pwd)
 VERBOSE=0
 LOCAL_DELIVERY_VERIFIER="${SCRIPT_DIR}/verify_delivery.sh"
 
+[[ -n "${ANSIBLE_NODE_USER:-}" ]] || err "ANSIBLE_NODE_USER 未配置"
+
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 REMOTE="${ANSIBLE_NODE_USER}@${ANSIBLE_NODE_IP}"
 
@@ -92,6 +94,30 @@ sudo_script_run() {
       printf '%s\n' "${script}"
     } | ssh_run "sudo -S -p '' bash -s"
   fi
+}
+
+remote_secret_script_run() {
+  local secret="$1"
+  local script="$2"
+  {
+    printf '%s\n' "${secret}"
+    printf '%s\n' "${script}"
+  } | ssh_run 'read -r ECOPILOT_SECRET; script_file=$(mktemp); chmod 600 "$script_file"; cat > "$script_file"; ECOPILOT_SECRET="$ECOPILOT_SECRET" bash "$script_file"; rc=$?; rm -f -- "$script_file"; exit "$rc"'
+}
+
+DEPLOY_SUDOERS_FILE="/etc/sudoers.d/ecopilot-deploy-${ANSIBLE_NODE_USER}"
+DB_SUDOERS_FILE="/etc/sudoers.d/ecopilot-deploy-${DB_USER:-dbuser}"
+
+cleanup_deploy_sudoers() {
+  set +e
+  remote_secret_script_run "${DB_PASS}" "$(cat <<EOF
+for ip in ${DB_IPS[*]}; do
+  ssh -n -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${DB_USER}@\${ip} \\
+    "sudo -n rm -f '${DB_SUDOERS_FILE}'" >/dev/null 2>&1 || true
+done
+EOF
+)" >/dev/null 2>&1 || true
+  sudo_script_run "rm -f '${DEPLOY_SUDOERS_FILE}'" >/dev/null 2>&1 || true
 }
 
 # ============================================================
@@ -233,12 +259,12 @@ step2b_upload_playbooks() {
 set -e
 mkdir -p /etc/ansible/group_vars
 cp '${REMOTE_PLAYBOOK_DIR}/group_vars/'*.yml /etc/ansible/group_vars/
-chown root:sysadmin /etc/ansible/group_vars/*.yml
+chown root:${ANSIBLE_NODE_USER} /etc/ansible/group_vars/*.yml
 chmod 0640 /etc/ansible/group_vars/*.yml
 source_files=\$(find '${REMOTE_PLAYBOOK_DIR}/group_vars' -maxdepth 1 -type f -name '*.yml' -exec basename {} \\; | sort)
 target_files=\$(find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' -exec basename {} \\; | sort)
 test "\${source_files}" = "\${target_files}"
-test -z "\$(find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' ! -user root -o -type f -name '*.yml' ! -group sysadmin)"
+test -z "\$(find /etc/ansible/group_vars -maxdepth 1 -type f \( ! -user root -o ! -group ${ANSIBLE_NODE_USER} \))"
 test -z "\$(find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' ! -perm 0640)"
 EOF
 )"
@@ -284,23 +310,23 @@ step2c_upload_db_packages() {
 step3_install() {
   info "3" "在管理节点上安装 Ansible + sshpass"
 
-  # <<EOF 内：${REMOTE_PKG_DIR} / ${ANSIBLE_NODE_PASS} 在本地展开，\$() 在远端执行
+  # 仅展开非敏感路径；sudo 密码由 sudo_script_run 通过 stdin 传递。
   # 注意：不做"已安装跳过"的幂等检查。
   # 原因：pip "Requirement already satisfied" 会跳过写操作（含 console_scripts），
   # 若 Python 包已在 dist-packages 但 /usr/local/bin/ansible 不存在，
   # pip 不报错也不重建 binary，导致后续所有步骤失败。
   # 解决：始终带 --force-reinstall --no-deps，强制重建 console_scripts。
-  ssh_run "bash -s" <<EOF
+  sudo_script_run "$(cat <<EOF
 # 安装 sshpass（幂等）
 if ! command -v sshpass &>/dev/null; then
-  printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S dpkg -i ${REMOTE_PKG_DIR}/sshpass/sshpass_*.deb
+  dpkg -i ${REMOTE_PKG_DIR}/sshpass/sshpass_*.deb
 fi
 
 # 安装 Ansible（借用 pip whl 内置 pip，pip 本身不装到系统）。
 # 已有可用命令时跳过重装，避免重复卸载管理节点上正在工作的 Ansible。
 if ! command -v ansible-playbook &>/dev/null; then
   PIP_WHL=\$(ls ${REMOTE_PKG_DIR}/pip/pip-*.whl | head -1)
-  printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S python3 "\${PIP_WHL}/pip" install \
+  python3 "\${PIP_WHL}/pip" install \
     --no-index \
     --find-links ${REMOTE_PKG_DIR}/ansible \
     --force-reinstall \
@@ -311,6 +337,7 @@ else
   echo "Ansible 已安装，跳过离线重装"
 fi
 EOF
+)"
 
   local ver
   ver=$(ssh_run "ansible --version | head -1") || true
@@ -324,15 +351,17 @@ EOF
 step3b_nopasswd_ansible_node() {
   info "3b" "配置管理节点 NOPASSWD sudo"
 
-  ssh_run "bash -s" <<EOF
-if printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S grep -q '^sysadmin ALL=(ALL) NOPASSWD: ALL$' /etc/sudoers.d/sysadmin 2>/dev/null; then
+  sudo_script_run "$(cat <<EOF
+if grep -q '^${ANSIBLE_NODE_USER} ALL=(ALL) NOPASSWD: ALL$' '${DEPLOY_SUDOERS_FILE}' 2>/dev/null; then
   echo "  ✔ 已配置，跳过"
 else
-  printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S sh -c \\
-    "echo 'sysadmin ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/sysadmin && chmod 440 /etc/sudoers.d/sysadmin"
+  printf '%s\n' '${ANSIBLE_NODE_USER} ALL=(ALL) NOPASSWD: ALL' > '${DEPLOY_SUDOERS_FILE}'
+  chmod 440 '${DEPLOY_SUDOERS_FILE}'
+  visudo -cf '${DEPLOY_SUDOERS_FILE}'
   echo "  ✔ 配置完成（权限 440）"
 fi
 EOF
+)"
   ok "管理节点 NOPASSWD sudo 已就绪"
 }
 
@@ -358,8 +387,8 @@ step4_keygen() {
 step5_distribute_pubkey() {
   info "5" "分发公钥到 DB 服务器（${#DB_IPS[@]} 台）"
 
-  # ${DB_IPS[*]} / ${DB_USER} / ${DB_PASS} 在本地展开，\${ip} 在管理节点执行
-  ssh_run "bash -s" <<EOF
+  # 拓扑和账号在本地展开；数据库密码通过管理节点脚本 stdin 传递。
+  remote_secret_script_run "${DB_PASS}" "$(cat <<EOF
 total_ok=0; total_skip=0; total_fail=0
 for ip in ${DB_IPS[*]}; do
   if ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 \
@@ -367,7 +396,7 @@ for ip in ${DB_IPS[*]}; do
     echo "  ✔ \${ip} 已有免密 SSH，跳过"
     total_skip=\$((total_skip+1))
   else
-    if SSHPASS='${DB_PASS}' sshpass -e \
+    if SSHPASS="\${ECOPILOT_SECRET}" sshpass -e \
          ssh-copy-id -o StrictHostKeyChecking=no \
          -i ~/.ssh/id_rsa.pub ${DB_USER}@\${ip} >/dev/null 2>&1; then
       echo "  ✔ \${ip} 公钥已分发"
@@ -381,6 +410,7 @@ done
 echo "  → 完成：新增 \${total_ok}，跳过 \${total_skip}，失败 \${total_fail}"
 [ "\${total_fail}" -eq 0 ] || exit 1
 EOF
+  )"
   ok "公钥分发完成（免密 SSH 已建立）"
 }
 
@@ -388,18 +418,17 @@ EOF
 step6_nopasswd_sudo() {
   info "6" "配置 DB 服务器 NOPASSWD sudo（${#DB_IPS[@]} 台）"
 
-  ssh_run "bash -s" <<EOF
+  remote_secret_script_run "${DB_PASS}" "$(cat <<EOF
 total_ok=0; total_skip=0; total_fail=0
 for ip in ${DB_IPS[*]}; do
   if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${DB_USER}@\${ip} \
-      "grep -q '^${DB_USER} ALL=(ALL) NOPASSWD: ALL$' /etc/sudoers.d/${DB_USER} 2>/dev/null" 2>/dev/null; then
+      "grep -q '^${DB_USER} ALL=(ALL) NOPASSWD: ALL$' '${DB_SUDOERS_FILE}' 2>/dev/null" 2>/dev/null; then
     echo "  ✔ \${ip} 已配置 NOPASSWD sudo，跳过"
     total_skip=\$((total_skip+1))
   else
-    if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${DB_USER}@\${ip} \
-         "printf '%s\n' '${DB_PASS}' | sudo -S bash -c \
-          \"echo '${DB_USER} ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/${DB_USER} && \
-            chmod 440 /etc/sudoers.d/${DB_USER}\"" 2>&1; then
+        if printf '%s\n' "\${ECOPILOT_SECRET}" | \
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${DB_USER}@\${ip} \
+          "sudo -S -p '' bash -c \"printf '%s\\n' '${DB_USER} ALL=(ALL) NOPASSWD: ALL' > '${DB_SUDOERS_FILE}' && chmod 440 '${DB_SUDOERS_FILE}' && visudo -cf '${DB_SUDOERS_FILE}'\"" 2>&1; then
       echo "  ✔ \${ip} sudo 已配置（权限 440）"
       total_ok=\$((total_ok+1))
     else
@@ -411,6 +440,7 @@ done
 echo "  → 完成：新增 \${total_ok}，跳过 \${total_skip}，失败 \${total_fail}"
 [ "\${total_fail}" -eq 0 ] || exit 1
 EOF
+  )"
   ok "NOPASSWD sudo 配置完成"
 }
 
@@ -521,7 +551,7 @@ step7_inventory() {
                                  sudo chown root:root /etc/ansible/hosts && sudo chmod 0644 /etc/ansible/hosts && \
                                  sudo rm -f /tmp/ecopilot-ansible-hosts && \
                                  ansible-inventory -i /etc/ansible/hosts --graph >/dev/null && printf '%s\\n' \"\${state}\"" ); then
-    err "Inventory 写入后无法由 sysadmin 解析，请检查 /etc/ansible/hosts"
+    err "Inventory 写入后无法由 ${ANSIBLE_NODE_USER} 解析，请检查 /etc/ansible/hosts"
   fi
   if [[ "${inventory_state}" == "UPDATED" ]]; then
     ok "Inventory 已按当前拓扑更新"
@@ -538,22 +568,22 @@ step7b_group_vars() {
   ssh_run "set -e
            sudo mkdir -p /etc/ansible/group_vars
            sudo cp '${REMOTE_PLAYBOOK_DIR}/group_vars/'*.yml /etc/ansible/group_vars/
-           sudo chown root:sysadmin /etc/ansible/group_vars/*.yml
+           sudo chown root:${ANSIBLE_NODE_USER} /etc/ansible/group_vars/*.yml
            sudo chmod 0640 /etc/ansible/group_vars/*.yml
            source_files=\$(find '${REMOTE_PLAYBOOK_DIR}/group_vars' -maxdepth 1 -type f -name '*.yml' -exec basename {} \\; | sort)
            target_files=\$(sudo find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' -exec basename {} \\; | sort)
            test \"\${source_files}\" = \"\${target_files}\"
-           test -z \"\$(sudo find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' ! -user root -o -type f -name '*.yml' ! -group sysadmin)\"
+           test -z \"\$(sudo find /etc/ansible/group_vars -maxdepth 1 -type f \( ! -user root -o ! -group ${ANSIBLE_NODE_USER} \))\"
            test -z \"\$(sudo find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' ! -perm 0640)\""
-  ok "group_vars 已同步并通过 root:sysadmin/0640 权限校验"
+  ok "group_vars 已同步并通过 root:${ANSIBLE_NODE_USER}/0640 权限校验"
 }
 
 # Step 8: 写入 ansible.cfg
 step8_ansible_cfg() {
   info "8" "写入 /etc/ansible/ansible.cfg"
 
-  ssh_run "bash -s" <<'REMOTE'
-sudo bash -c 'printf "[defaults]\ninventory = /etc/ansible/hosts\nhost_key_checking = False\nremote_user = sysadmin\nprivate_key_file = /home/sysadmin/.ssh/id_rsa\n\n[privilege_escalation]\nbecome = True\nbecome_method = sudo\nbecome_user = root\nbecome_ask_pass = False\n" > /etc/ansible/ansible.cfg && chown root:root /etc/ansible/ansible.cfg && chmod 0644 /etc/ansible/ansible.cfg'
+  ssh_run "bash -s" <<REMOTE
+sudo bash -c 'printf "[defaults]\ninventory = /etc/ansible/hosts\nhost_key_checking = False\nremote_user = ${ANSIBLE_NODE_USER}\nprivate_key_file = /home/${ANSIBLE_NODE_USER}/.ssh/id_rsa\n\n[privilege_escalation]\nbecome = True\nbecome_method = sudo\nbecome_user = root\nbecome_ask_pass = False\n" > /etc/ansible/ansible.cfg && chown root:root /etc/ansible/ansible.cfg && chmod 0644 /etc/ansible/ansible.cfg'
 REMOTE
   ok "ansible.cfg 已写入"
 }
@@ -847,6 +877,7 @@ case "${1:-}" in
         *) err "未知 deploy 参数：${argument}（支持 --verbose）" ;;
       esac
     done
+    trap cleanup_deploy_sudoers EXIT
     deploy_all "$@"
     ;;
   *)

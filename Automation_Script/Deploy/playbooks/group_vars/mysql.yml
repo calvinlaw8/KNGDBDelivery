@@ -43,6 +43,7 @@ mysql_repl_password: "CHANGE_ME"
 
 # Keepalived VIP 配置
 mysql_vip: "CHANGE_ME"
+mysql_vip_prefix: 24
 # 使用 auto 时由每台 MySQL 节点根据默认路由自动识别实际网卡。
 keepalived_interface: "auto"
 keepalived_router_id: 61

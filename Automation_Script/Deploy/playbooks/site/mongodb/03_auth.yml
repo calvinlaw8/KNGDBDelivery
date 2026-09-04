@@ -60,64 +60,62 @@
       run_once: true
 
 
-- name: MongoDB 认证 - 生成 keyFile（Ansible 控制节点）
-  hosts: localhost
-  gather_facts: false
-  become: false
-  tags: mongodb, mongodb-keyfile
-
-  tasks:
-    - name: 创建临时 keyFile 目录
-      ansible.builtin.file:
-        path: /tmp/mongodb_auth
-        state: directory
-        mode: "0700"
-
-    - name: 检查 keyFile 是否已生成
-      ansible.builtin.stat:
-        path: /tmp/mongodb_auth/mongodb.keyfile
-      register: keyfile_stat
-
-    - name: 生成 keyFile（openssl rand -base64 756）
-      ansible.builtin.shell:
-        cmd: >
-          openssl rand -base64 756 > /tmp/mongodb_auth/mongodb.keyfile
-      when: not keyfile_stat.stat.exists
-
-
-- name: MongoDB 认证 - 分发 keyFile 至各节点
+- name: MongoDB 认证 - 生成、分发并清理 keyFile
   hosts: mongodb
   gather_facts: false
   tags: mongodb, mongodb-keyfile
 
   tasks:
-    - name: 分发 keyFile（mode=0400，owner=mongodb:mongodb）
-      ansible.builtin.copy:
-        src: /tmp/mongodb_auth/mongodb.keyfile
-        dest: "{{ mongodb_keyfile }}"
-        owner: mongodb
-        group: mongodb
-        mode: "0400"
-      become: true
-      no_log: true
+    - name: 生成并分发 keyFile，始终清理控制节点临时文件
+      block:
+        - name: 创建临时 keyFile 目录
+          ansible.builtin.file:
+            path: /tmp/mongodb_auth
+            state: directory
+            mode: "0700"
+          delegate_to: localhost
+          run_once: true
 
-    - name: 验证 keyFile 权限
-      ansible.builtin.stat:
-        path: "{{ mongodb_keyfile }}"
-      register: keyfile_remote
+        - name: 生成新的 keyFile
+          ansible.builtin.shell:
+            cmd: umask 077 && openssl rand -base64 756 > /tmp/mongodb_auth/mongodb.keyfile
+          delegate_to: localhost
+          run_once: true
 
-    - name: 断言 keyFile 权限正确（mode=0400，owner=mongodb）
-      ansible.builtin.assert:
-        that:
-          - keyfile_remote.stat.exists
-          - keyfile_remote.stat.mode == "0400"
-          - keyfile_remote.stat.pw_name == "mongodb"
-          - keyfile_remote.stat.gr_name == "mongodb"
-        fail_msg: >
-          keyFile 权限错误！
-          当前: mode={{ keyfile_remote.stat.mode }},
-          owner={{ keyfile_remote.stat.pw_name }}:{{ keyfile_remote.stat.gr_name }}
-          要求: mode=0400, owner=mongodb:mongodb
+        - name: 分发 keyFile（mode=0400，owner=mongodb:mongodb）
+          ansible.builtin.copy:
+            src: /tmp/mongodb_auth/mongodb.keyfile
+            dest: "{{ mongodb_keyfile }}"
+            owner: mongodb
+            group: mongodb
+            mode: "0400"
+          become: true
+          no_log: true
+
+        - name: 验证 keyFile 权限
+          ansible.builtin.stat:
+            path: "{{ mongodb_keyfile }}"
+          register: keyfile_remote
+
+        - name: 断言 keyFile 权限正确（mode=0400，owner=mongodb）
+          ansible.builtin.assert:
+            that:
+              - keyfile_remote.stat.exists
+              - keyfile_remote.stat.mode == "0400"
+              - keyfile_remote.stat.pw_name == "mongodb"
+              - keyfile_remote.stat.gr_name == "mongodb"
+            fail_msg: >
+              keyFile 权限错误！
+              当前: mode={{ keyfile_remote.stat.mode }},
+              owner={{ keyfile_remote.stat.pw_name }}:{{ keyfile_remote.stat.gr_name }}
+              要求: mode=0400, owner=mongodb:mongodb
+      always:
+        - name: 清理控制节点 keyFile 临时目录
+          ansible.builtin.file:
+            path: /tmp/mongodb_auth
+            state: absent
+          delegate_to: localhost
+          run_once: true
 
 
 - name: MongoDB 认证 - 更新 mongod.conf 并重启（启用认证）

@@ -41,6 +41,17 @@ ask_secret() {
   done
 }
 
+ask_component_secret() {
+  local prompt="$1"
+  while true; do
+    ask_secret "${prompt}"
+    if [[ "${ANSWER}" =~ ^[A-Za-z0-9._:@+=,-]+$ ]]; then
+      return
+    fi
+    warn "该服务凭据只能使用 ASCII 字母、数字及 . _ : @ + = , -，请重新输入"
+  done
+}
+
 is_valid_subnet_prefix() {
   local value="$1" part
   local old_ifs="${IFS}"
@@ -221,29 +232,37 @@ ask_component_config() {
 }
 
 ask_redis_credentials() {
-  ask_secret "Redis 服务访问密码（用于客户端连接 Redis，不是服务器 SSH 登录密码）"; redis_password="${ANSWER}"
+  ask_component_secret "Redis 服务访问密码（用于客户端连接 Redis，不是服务器 SSH 登录密码）"; redis_password="${ANSWER}"
 }
 
 ask_rabbitmq_credentials() {
-  ask_secret "RabbitMQ 节点间通信 Cookie（用于 RabbitMQ 集群节点互认证，不是服务器 SSH 登录密码）"; rabbitmq_cookie="${ANSWER}"
-  ask_secret "RabbitMQ 管理员服务密码（用于 RabbitMQ 管理和客户端访问，不是服务器 SSH 登录密码）"; rabbitmq_admin_password="${ANSWER}"
+  ask_component_secret "RabbitMQ 节点间通信 Cookie（用于 RabbitMQ 集群节点互认证，不是服务器 SSH 登录密码）"; rabbitmq_cookie="${ANSWER}"
+  ask_component_secret "RabbitMQ 管理员服务密码（用于 RabbitMQ 管理和客户端访问，不是服务器 SSH 登录密码）"; rabbitmq_admin_password="${ANSWER}"
 }
 
 ask_mongodb_credentials() {
-  ask_secret "MongoDB admin 服务访问密码（用于登录 MongoDB，不是服务器 SSH 登录密码）"; mongodb_admin_password="${ANSWER}"
+  ask_component_secret "MongoDB admin 服务访问密码（用于登录 MongoDB，不是服务器 SSH 登录密码）"; mongodb_admin_password="${ANSWER}"
 }
 
 ask_mysql_credentials() {
-  ask_secret "MySQL root 数据库密码（用于登录 MySQL，不是服务器 SSH 登录密码）"; mysql_root_password="${ANSWER}"
-  ask_secret "MySQL replication 复制账号密码（用于 MySQL 主从复制，不是服务器 SSH 登录密码）"; mysql_repl_password="${ANSWER}"
+  ask_component_secret "MySQL root 数据库密码（用于登录 MySQL，不是服务器 SSH 登录密码）"; mysql_root_password="${ANSWER}"
+  ask_component_secret "MySQL replication 复制账号密码（用于 MySQL 主从复制，不是服务器 SSH 登录密码）"; mysql_repl_password="${ANSWER}"
   ask "MySQL Keepalived VIP"; mysql_vip="${ANSWER}"
+  while true; do
+    ask "MySQL Keepalived VIP 前缀长度（1-32，默认 24）" "24"
+    mysql_vip_prefix="${ANSWER}"
+    if [[ "${mysql_vip_prefix}" =~ ^[0-9]+$ ]] && ((10#${mysql_vip_prefix} >= 1 && 10#${mysql_vip_prefix} <= 32)); then
+      break
+    fi
+    warn "VIP 前缀长度必须是 1 到 32 的整数"
+  done
   while true; do
     ask_secret "Keepalived 节点认证密码（用于 MySQL 高可用节点通信，不是服务器 SSH 登录密码，最多 8 个字符）"
     keepalived_auth_pass="${ANSWER}"
-    if [[ "${#keepalived_auth_pass}" -le 8 ]]; then
+    if [[ "${keepalived_auth_pass}" =~ ^[A-Za-z0-9._:@+=,-]+$ && "${#keepalived_auth_pass}" -le 8 ]]; then
       break
     fi
-    warn "Keepalived auth_pass 最多 8 个字符，请重新输入"
+    warn "Keepalived auth_pass 只能使用 ASCII 字母、数字及 . _ : @ + = , -，且最多 8 个字符"
   done
 }
 
@@ -441,7 +460,7 @@ write_runtime_config() {
     printf 'PKG_ROOT=%q\nLOCAL_DB_PKG_DIR=%q\n' "${PROJECT_ROOT}/Automation_Script/Deploy/pkg" "${PROJECT_ROOT}/离线安装包"
     printf 'ANSIBLE_NODE_IP=%q\nANSIBLE_NODE_USER=%q\nANSIBLE_NODE_PASS=%q\nANSIBLE_NODE_HOSTNAME=%q\n' "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_USER}" "${ANSIBLE_NODE_PASS}" "${ANSIBLE_NODE_HOSTNAME}"
     printf 'LOCAL_PLAYBOOK_DIR=%q\nREMOTE_PLAYBOOK_DIR=%q\nLOCAL_PAYLOAD_VALIDATOR=%q\nREMOTE_PAYLOAD_VALIDATOR=%q\nREMOTE_PKG_DIR=%q\n' \
-      "${RUNTIME_PLAYBOOK_DIR}" "/home/sysadmin/playbooks" "${PROJECT_ROOT}/Automation_Script/Deploy/validate_deb_payloads.sh" "/home/sysadmin/validate_deb_payloads.sh" "/home/sysadmin/pkg"
+      "${RUNTIME_PLAYBOOK_DIR}" "/home/${ANSIBLE_NODE_USER}/playbooks" "${PROJECT_ROOT}/Automation_Script/Deploy/validate_deb_payloads.sh" "/home/${ANSIBLE_NODE_USER}/validate_deb_payloads.sh" "/home/${ANSIBLE_NODE_USER}/pkg"
     for i in 0 1 2; do printf 'REDIS_IPS[%d]=%q\nREDIS_HOSTNAMES[%d]=%q\n' "$i" "${REDIS_IPS[$i]}" "$i" "${REDIS_HOSTNAMES[$i]}"; done
     for i in 0 1 2; do printf 'RABBITMQ_IPS[%d]=%q\nRABBITMQ_HOSTNAMES[%d]=%q\n' "$i" "${RABBITMQ_IPS[$i]}" "$i" "${RABBITMQ_HOSTNAMES[$i]}"; done
     for i in 0 1 2; do printf 'MONGODB_IPS[%d]=%q\nMONGODB_HOSTNAMES[%d]=%q\n' "$i" "${MONGODB_IPS[$i]}" "$i" "${MONGODB_HOSTNAMES[$i]}"; done
@@ -523,6 +542,7 @@ main() {
   yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_root_password "${mysql_root_password}"
   yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_repl_password "${mysql_repl_password}"
   yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_vip "${mysql_vip}"
+  yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_vip_prefix "${mysql_vip_prefix}"
   yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" keepalived_auth_pass "${keepalived_auth_pass}"
   yaml_block "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_nodes "$(printf 'mysql_nodes:\n  - ip: \"%s\"\n    hostname: \"%s\"\n    server_id: 1\n    role: \"primary\"\n    keepalived_priority: 100\n  - ip: \"%s\"\n    hostname: \"%s\"\n    server_id: 2\n    role: \"replica\"\n    keepalived_priority: 90\n  - ip: \"%s\"\n    hostname: \"%s\"\n    server_id: 3\n    role: \"replica\"\n    keepalived_priority: 80' "${MYSQL_IPS[0]}" "${MYSQL_HOSTNAMES[0]}" "${MYSQL_IPS[1]}" "${MYSQL_HOSTNAMES[1]}" "${MYSQL_IPS[2]}" "${MYSQL_HOSTNAMES[2]}")"
 
@@ -530,7 +550,7 @@ main() {
     printf 'eCopilot 数据库高可用部署摘要\n生成时间：%s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
     printf 'Ansible 管理节点：%s (%s)\n' "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_HOSTNAME}"
     printf 'Redis：%s\nRabbitMQ：%s\nMongoDB：%s\nMySQL：%s\n' "${REDIS_IPS[*]}" "${RABBITMQ_IPS[*]}" "${MONGODB_IPS[*]}" "${MYSQL_IPS[*]}"
-    printf '\nMySQL VIP：%s\nMongoDB keyFile：部署后各节点 %s\n' "${mysql_vip}" "/etc/mongodb-keyfile"
+    printf '\nMySQL VIP：%s/%s\nMongoDB keyFile：部署后各节点 %s\n' "${mysql_vip}" "${mysql_vip_prefix}" "/etc/mongodb-keyfile"
     printf '\n敏感凭据位置：%s（权限 600）\n运行时配置位置：%s（目录权限 700）\n' "${CREDENTIALS_FILE}" "${CONFIG_FILE}"
   } > "${SUMMARY_FILE}"
   chmod 600 "${SUMMARY_FILE}"

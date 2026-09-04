@@ -189,7 +189,9 @@
           block:
             - name: 添加 admin 用户
               ansible.builtin.command: >
-                rabbitmqctl add_user {{ rabbitmq_admin_user }} {{ rabbitmq_admin_password }}
+                rabbitmqctl add_user {{ rabbitmq_admin_user }}
+              args:
+                stdin: "{{ rabbitmq_admin_password }}\n"
               become: true
               no_log: true
 

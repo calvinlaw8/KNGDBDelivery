@@ -31,6 +31,37 @@
       when: inventory_hostname == mysql_primary_ip
       run_once: true
 
+    - name: 清理 root 非本地远程管理账号
+      become: true
+      no_log: true
+      block:
+        - name: 写入 root 远程账号清理 SQL
+          ansible.builtin.copy:
+            dest: /run/ecopilot-mysql-root-cleanup.sql
+            content: |
+              DROP USER IF EXISTS 'root'@'%';
+              FLUSH PRIVILEGES;
+            owner: root
+            group: root
+            mode: "0600"
+
+        - name: 执行 root 远程账号清理 SQL
+          ansible.builtin.shell:
+            cmd: >
+              {{ mysql_client_bin }}
+              --protocol=TCP
+              --host=127.0.0.1
+              --port={{ mysql_port }}
+              -u root
+              -e "source /run/ecopilot-mysql-root-cleanup.sql"
+
+      always:
+        - name: 删除 root 远程账号清理 SQL
+          ansible.builtin.file:
+            path: /run/ecopilot-mysql-root-cleanup.sql
+            state: absent
+          become: true
+
     - name: 检查 repl 账号是否已存在
       ansible.builtin.shell:
         cmd: >
@@ -53,22 +84,40 @@
         - inventory_hostname == mysql_primary_ip
         - repl_user_check.stdout | trim | int == 0
       run_once: true
-      ansible.builtin.shell:
-        cmd: >
-          {{ mysql_client_bin }}
-          --protocol=TCP
-          --host=127.0.0.1
-          --port={{ mysql_port }}
-          -u root
-          -e "
-            CREATE USER '{{ mysql_repl_user }}'@'%'
-            IDENTIFIED WITH caching_sha2_password
-            BY '{{ mysql_repl_password }}';
-            GRANT REPLICATION SLAVE ON *.* TO '{{ mysql_repl_user }}'@'%';
-            FLUSH PRIVILEGES;
-          "
-      become: true
-      no_log: true
+      block:
+        - name: 写入临时复制账号 SQL
+          ansible.builtin.copy:
+            dest: /run/ecopilot-mysql-replication.sql
+            content: |
+              CREATE USER '{{ mysql_repl_user }}'@'%'
+                IDENTIFIED WITH caching_sha2_password
+                BY '{{ mysql_repl_password | replace("'", "''") }}';
+              GRANT REPLICATION SLAVE ON *.* TO '{{ mysql_repl_user }}'@'%';
+              FLUSH PRIVILEGES;
+            owner: root
+            group: root
+            mode: "0600"
+          become: true
+          no_log: true
+
+        - name: 执行复制账号 SQL
+          ansible.builtin.shell:
+            cmd: >
+              {{ mysql_client_bin }}
+              --protocol=TCP
+              --host=127.0.0.1
+              --port={{ mysql_port }}
+              -u root
+              -e "source /run/ecopilot-mysql-replication.sql"
+          become: true
+          no_log: true
+
+      always:
+        - name: 删除临时复制账号 SQL
+          ansible.builtin.file:
+            path: /run/ecopilot-mysql-replication.sql
+            state: absent
+          become: true
 
     - name: 显示 Primary GTID 已执行集合
       ansible.builtin.shell:
@@ -121,27 +170,45 @@
 
         - name: 配置 CHANGE REPLICATION SOURCE（若未启动）
           when: "'Replica_IO_Running: Yes' not in repl_status.stdout"
-          ansible.builtin.shell:
-            cmd: >
-              {{ mysql_client_bin }}
-              --protocol=TCP
-              --host=127.0.0.1
-              --port={{ mysql_port }}
-              -u root
-              -e "
-                STOP REPLICA;
-                RESET REPLICA ALL;
-                CHANGE REPLICATION SOURCE TO
-                  SOURCE_HOST='{{ mysql_primary_ip }}',
-                  SOURCE_PORT={{ mysql_port }},
-                  SOURCE_USER='{{ mysql_repl_user }}',
-                  SOURCE_PASSWORD='{{ mysql_repl_password }}',
-                  GET_SOURCE_PUBLIC_KEY=1,
-                  SOURCE_AUTO_POSITION=1;
-                START REPLICA;
-              "
-          become: true
-          no_log: true
+          block:
+            - name: 写入临时 Replica 配置 SQL
+              ansible.builtin.copy:
+                dest: /run/ecopilot-mysql-replica-config.sql
+                content: |
+                  STOP REPLICA;
+                  RESET REPLICA ALL;
+                  CHANGE REPLICATION SOURCE TO
+                    SOURCE_HOST='{{ mysql_primary_ip }}',
+                    SOURCE_PORT={{ mysql_port }},
+                    SOURCE_USER='{{ mysql_repl_user }}',
+                    SOURCE_PASSWORD='{{ mysql_repl_password | replace("'", "''") }}',
+                    GET_SOURCE_PUBLIC_KEY=1,
+                    SOURCE_AUTO_POSITION=1;
+                  START REPLICA;
+                owner: root
+                group: root
+                mode: "0600"
+              become: true
+              no_log: true
+
+            - name: 执行临时 Replica 配置 SQL
+              ansible.builtin.shell:
+                cmd: >
+                  {{ mysql_client_bin }}
+                  --protocol=TCP
+                  --host=127.0.0.1
+                  --port={{ mysql_port }}
+                  -u root
+                  -e "source /run/ecopilot-mysql-replica-config.sql"
+              become: true
+              no_log: true
+
+          always:
+            - name: 删除临时 Replica 配置 SQL
+              ansible.builtin.file:
+                path: /run/ecopilot-mysql-replica-config.sql
+                state: absent
+              become: true
 
         - name: 确保 Replica 设为只读
           ansible.builtin.shell:

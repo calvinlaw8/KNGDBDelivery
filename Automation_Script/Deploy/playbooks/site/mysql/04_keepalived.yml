@@ -159,7 +159,7 @@
             }
 
             virtual_ipaddress {
-              {{ mysql_vip }}/24
+              {{ mysql_vip }}/{{ mysql_vip_prefix }}
             }
 
             track_script {
