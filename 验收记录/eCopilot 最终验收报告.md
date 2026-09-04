@@ -48,7 +48,7 @@ eCopilot 数据库高可用部署已在 2026-09-03 完成隔离测试环境的�
 | Playbook syntax-check | 通过 |
 | 正式载荷同步 | Redis 2、RabbitMQ 19、MongoDB 9、MySQL 16，全部成功 |
 | 首次部署 | 通过 |
-| 首次完整部署 | 通过；后续非破坏性 RabbitMQ 幂等重跑失败，需修复复测 |
+| 首次完整部署 | 通过；RabbitMQ 修复后专项重跑和后续完整流程复测通过 |
 | Keepalived 幂等重跑 | `failed=0`，三节点 `changed=0` |
 | `dpkg --audit` | 12 台数据库节点均为空 |
 | 本轮隔离回归 | 13 台 VM 恢复并开机，12/12 Ansible ping，部署阶段和 Postflight 均 `unreachable=0 failed=0` |
@@ -117,8 +117,7 @@ eCopilot 数据库高可用部署已在 2026-09-03 完成隔离测试环境的�
 - MySQL 主库故障后的角色提升必须由 DBA 按现场故障恢复手册人工确认和执行；
 - 本报告中的 Redis、RabbitMQ、MongoDB 结果仅证明部署后的服务、角色和集群静态状态正常，未证明真实故障后的业务读写、消息持久性或恢复重建；
 - 本报告证明测试环境交付包和自动化流程已验收，不替代生产环境上线前的现场配置核对和授权故障演练。
-- 2026-09-03 的完整部署通过不等于完整幂等重跑通过：后续非破坏性重跑在 RabbitMQ
-	种子节点持续 `activating` 后以 `exit=2` 退出，需修复并复测。
+- 2026-09-03 的完整流程复测记录显示，RabbitMQ 修复后的成员收敛检查已通过，且全流程退出码为 `0`、总耗时 `35m58s`；该结果仍不等于 Redis Sentinel、RabbitMQ Quorum Queue 或 MongoDB majority 写入的真实故障恢复验收。
 
 ## 8. 交付文件
 
