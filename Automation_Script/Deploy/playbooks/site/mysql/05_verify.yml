@@ -9,6 +9,8 @@
   hosts: mysql
   gather_facts: false
   tags: mysql, mysql-verify
+  environment:
+    MYSQL_PWD: "{{ mysql_root_password }}"
 
   tasks:
     - name: 检查 mysqld 服务状态
@@ -48,7 +50,6 @@
           --host=127.0.0.1
           --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -e "SHOW REPLICA STATUS\G"
           | grep "Replica_IO_Running" | awk '{print $2}'
       register: io_running
@@ -66,7 +67,6 @@
           --host=127.0.0.1
           --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -e "SHOW REPLICA STATUS\G"
           | grep "Replica_SQL_Running:" | head -1 | awk '{print $2}'
       register: sql_running
@@ -80,7 +80,7 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }} --protocol=TCP --host=127.0.0.1
-          --port={{ mysql_port }} -u root -p"{{ mysql_root_password }}"
+          --port={{ mysql_port }} -u root
           -e "SHOW REPLICA STATUS\G" |
           awk -v threshold={{ mysql_replication_max_delay_seconds }} '
           function value(line) { sub(/^[^:]*:[[:space:]]*/, "", line); gsub(/[[:space:]\r]/, "", line); return line }
@@ -124,13 +124,12 @@
           --host=127.0.0.1
           --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -e "SHOW REPLICA STATUS\G"
           | grep -E "Executed_Gtid_Set|Source_Host|Seconds_Behind_Source"
       register: gtid_status
       changed_when: false
       become: true
-      no_log: false
+      no_log: true
 
     - name: 输出 GTID 状态详情
       when: inventory_hostname != mysql_primary_ip
@@ -161,7 +160,7 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }} --protocol=TCP --host={{ mysql_vip }}
-          --port={{ mysql_port }} -u root -p"{{ mysql_root_password }}"
+          --port={{ mysql_port }} -u root
           -NBe "SELECT 1, @@global.read_only;"
       register: vip_sql
       changed_when: false
@@ -184,12 +183,11 @@
           --host=127.0.0.1
           --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -NBe "SELECT @@gtid_executed;"
       register: primary_gtid
       changed_when: false
       become: true
-      no_log: false
+      no_log: true
       when: inventory_hostname == mysql_primary_ip
       run_once: true
 

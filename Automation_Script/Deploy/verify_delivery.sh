@@ -48,7 +48,7 @@ check_required_paths() {
 }
 
 check_lfs_and_hashes() {
-  local manifest_hash manifest_path actual_hash package_file
+  local manifest_hash manifest_path actual_hash package_file extra_field
   while read -r manifest_hash manifest_path; do
     [[ -n "${manifest_hash}" && -n "${manifest_path}" ]] || continue
     package_file="${DELIVERY_ROOT}/${manifest_path}"
@@ -66,6 +66,51 @@ check_lfs_and_hashes() {
   done < "${MANIFEST}"
 }
 
+check_manifest_layout() {
+  local line manifest_hash manifest_path actual_path extra_field
+  local manifest_paths actual_paths
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ -z "${line}" ]] && continue
+    manifest_hash=${line%%[[:space:]]*}
+    manifest_path=${line#${manifest_hash}}
+    manifest_path=$(printf '%s\n' "${manifest_path}" | sed 's/^[[:space:]]*//')
+    if [[ ! "${manifest_hash}" =~ ^[[:xdigit:]]{64}$ ]]; then
+      fail "SHA256 清单哈希格式非法：${line}"
+      continue
+    fi
+    if [[ "${manifest_path}" != 离线安装包/*/*.deb ||
+          "${manifest_path}" == /* ||
+          "${manifest_path}" == *../* ||
+          "${manifest_path}" == */../* ||
+          "${manifest_path}" == *$'\n'* ]]; then
+      fail "SHA256 清单路径不安全或不是正式 .deb：${manifest_path}"
+    fi
+  done < "${MANIFEST}"
+
+  manifest_paths=$(awk 'NF >= 2 {print $2}' "${MANIFEST}" | sort)
+
+  actual_paths=$(find "${PACKAGE_ROOT}" -type f -print | while IFS= read -r actual_path; do
+    actual_path=${actual_path#${DELIVERY_ROOT}/}
+    printf '%s\n' "${actual_path}"
+  done | sort)
+
+  if [[ "${manifest_paths}" != "${actual_paths}" ]]; then
+    fail "SHA256 清单与实际载荷文件集合不一致（拒绝缺失或额外载荷）"
+    comm -23 <(printf '%s\n' "${manifest_paths}") <(printf '%s\n' "${actual_paths}") |
+      while IFS= read -r manifest_path; do
+        [[ -n "${manifest_path}" ]] && printf 'FAIL: 清单声明但载荷缺失：%s\n' "${manifest_path}" >&2
+      done
+    comm -13 <(printf '%s\n' "${manifest_paths}") <(printf '%s\n' "${actual_paths}") |
+      while IFS= read -r actual_path; do
+        [[ -n "${actual_path}" ]] && printf 'FAIL: 载荷存在但不在清单：%s\n' "${actual_path}" >&2
+      done
+  fi
+
+  if [[ "${manifest_paths}" != "$(printf '%s\n' "${manifest_paths}" | uniq -u)" ]]; then
+    fail "SHA256 清单包含重复路径"
+  fi
+}
+
 check_payload_layout() {
   local component file
   for component in redis rabbitmq mongodb mysql; do
@@ -77,6 +122,9 @@ check_payload_layout() {
     while IFS= read -r -d '' file; do
       [[ "${file}" == *.deb ]] || fail "载荷目录存在非 .deb 文件：${file}"
     done < <(find "${component_dir}" -maxdepth 1 -type f -print0)
+    while IFS= read -r -d '' file; do
+      fail "载荷目录存在嵌套目录：${file}"
+    done < <(find "${component_dir}" -mindepth 1 -type d -print0)
     while IFS= read -r -d '' file; do
       fail "载荷目录存在零字节 .deb：${file}"
     done < <(find "${component_dir}" -maxdepth 1 -type f -name '*.deb' -size 0 -print0)
@@ -114,6 +162,9 @@ check_static_files() {
 }
 
 check_required_paths
+if ((failures == 0)); then
+  check_manifest_layout
+fi
 if ((failures == 0)); then
   check_lfs_and_hashes
   check_payload_layout

@@ -8,7 +8,6 @@ RESET_DIR="${PROJECT_ROOT}/数据库集群虚拟机重置命令"
 RESET_PLAYBOOK="${RESET_DIR}/T-eCopilot.yaml"
 RUNTIME_DIR="${SCRIPT_DIR}/.runtime"
 CONFIG_FILE="${RUNTIME_DIR}/config.env"
-VAULT_PASSWORD_FILE="${VAULT_PASSWORD_FILE:-${RUNTIME_DIR}/vault-password}"
 
 die() {
   printf '错误：%s\n' "$1" >&2
@@ -16,17 +15,8 @@ die() {
 }
 
 command -v ansible-playbook >/dev/null 2>&1 || die "本机缺少 ansible-playbook。请先使用现有初始化流程准备 Ansible。"
-[[ -f "${RESET_PLAYBOOK}" ]] || die "找不到加密重置 Playbook：${RESET_PLAYBOOK}"
+[[ -f "${RESET_PLAYBOOK}" ]] || die "找不到重置 Playbook：${RESET_PLAYBOOK}"
 [[ -f "${CONFIG_FILE}" ]] || die "找不到固定测试配置：${CONFIG_FILE}；无人值守测试不会启动交互式 install.sh。"
-vault_args=()
-if [[ -f "${VAULT_PASSWORD_FILE}" ]]; then
-  [[ -r "${VAULT_PASSWORD_FILE}" ]] || die "Vault 密码文件不可读：${VAULT_PASSWORD_FILE}"
-  vault_mode=$(stat -f '%Lp' "${VAULT_PASSWORD_FILE}" 2>/dev/null || stat -c '%a' "${VAULT_PASSWORD_FILE}" 2>/dev/null || true)
-  [[ "${vault_mode}" == "600" ]] || die "Vault 密码文件权限必须为 600：${VAULT_PASSWORD_FILE}（当前 ${vault_mode:-未知}）"
-  vault_args=(--vault-password-file "${VAULT_PASSWORD_FILE}")
-else
-  vault_args=(--ask-vault-pass)
-fi
 
 post_reset_ssh_gate() {
   local ip label pass user attempt
@@ -75,17 +65,13 @@ post_reset_ssh_gate() {
 
 printf '\n测试专用自动化部署入口\n'
 printf '执行顺序：SSH 指纹风险提示 -> 测试虚拟机快照重置 -> 固定配置部署。\n'
-printf '模式：无人值守；不会请求 RESET、Vault 密码、服务器密码或配置录入。\n'
+printf '模式：无人值守；不会请求 RESET、服务器密码或配置录入。\n'
 printf '\n警告：重置会覆盖测试虚拟机当前状态。本入口只能用于固定的隔离测试环境。\n'
 printf '首次连接目标主机时的 SSH 指纹策略以现有部署脚本为准。\n\n'
 
 cd "${RESET_DIR}"
-if [[ "${vault_args[0]}" == "--ask-vault-pass" ]]; then
-  printf '开始重置测试虚拟机；本机没有受保护 Vault 文件，将在终端安全询问 Vault 密码。\n'
-else
-  printf '开始重置测试虚拟机；Vault 密码从受保护文件读取。\n'
-fi
-ansible-playbook "${vault_args[@]}" "${RESET_PLAYBOOK}"
+printf '开始重置测试虚拟机；重置 Playbook 为未加密文件。\n'
+ansible-playbook "${RESET_PLAYBOOK}"
 
 source "${CONFIG_FILE}"
 post_reset_ssh_gate

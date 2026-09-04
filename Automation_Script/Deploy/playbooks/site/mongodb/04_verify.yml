@@ -34,12 +34,14 @@
         cmd: >
           mongosh admin --port {{ mongodb_port }} --quiet --norc
           -u {{ mongodb_admin_user }}
-          -p {{ mongodb_admin_password }}
+          -p
           --eval "rs.status().ok"
+        stdin: "{{ mongodb_admin_password }}\n"
       register: rs_ok
       changed_when: false
       failed_when: rs_ok.stdout | trim != '1'
       become: false
+      no_log: true
       when: inventory_hostname == mongodb_primary_ip
       run_once: true
 
@@ -48,15 +50,17 @@
         cmd: >
           mongosh admin --port {{ mongodb_port }} --quiet --norc
           -u {{ mongodb_admin_user }}
-          -p {{ mongodb_admin_password }}
+          -p
           --eval "
             rs.status().members.forEach(function(m){
               print(m.name + ' -> ' + m.stateStr)
             })
           "
+        stdin: "{{ mongodb_admin_password }}\n"
       register: rs_members
       changed_when: false
       become: false
+      no_log: true
       when: inventory_hostname == mongodb_primary_ip
       run_once: true
 
@@ -80,16 +84,18 @@
         cmd: >
           mongosh admin --port {{ mongodb_port }} --quiet --norc
           -u {{ mongodb_admin_user }}
-          -p {{ mongodb_admin_password }}
+          -p
           --eval "
             rs.status().members.filter(function(m){
               return m.stateStr == 'SECONDARY'
             }).length
           "
+        stdin: "{{ mongodb_admin_password }}\n"
       register: secondary_count
       changed_when: false
       failed_when: secondary_count.stdout | trim | int < 2
       become: false
+      no_log: true
       when: inventory_hostname == mongodb_primary_ip
       run_once: true
 

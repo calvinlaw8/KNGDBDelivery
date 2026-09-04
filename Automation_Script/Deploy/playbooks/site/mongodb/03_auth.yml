@@ -202,12 +202,14 @@
         cmd: >
           mongosh admin --port {{ mongodb_port }} --quiet --norc
           -u {{ mongodb_admin_user }}
-          -p {{ mongodb_admin_password }}
+          -p
           --eval "rs.status().ok"
+        stdin: "{{ mongodb_admin_password }}\n"
       register: rs_ok
       changed_when: false
       failed_when: rs_ok.stdout | trim != '1'
       become: false
+      no_log: true
       when: inventory_hostname == mongodb_primary_ip
       run_once: true
 

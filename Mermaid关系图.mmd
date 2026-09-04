@@ -1,0 +1,78 @@
+---
+references:
+  - "File: /Automation_Script/Deploy/init_ansible.sh"
+  - "File: /Automation_Script/Deploy/install.sh"
+  - "File: /Automation_Script/Deploy/run_test.sh"
+  - "File: /Automation_Script/Deploy/verify_delivery.sh"
+generationTime: 2026-09-02T10:04:34.227Z
+---
+flowchart TD
+    subgraph INSTALL["install.sh - Interactive Deployment Wizard"]
+        I0(["Start install.sh"]) --> I1["Collect management, database, node, and service credentials"]
+        I1 --> I2["Validate IP addresses, hostnames, duplicates, and MySQL VIP"]
+        I2 -->|Invalid configuration| I3["Show modification menu"]
+        I3 --> I1
+        I2 -->|Valid configuration| I4["Confirm deployment parameters"]
+        I4 -->|Modify| I3
+        I4 -->|Cancel| IX(["Exit"])
+        I4 -->|Confirmed| I5["Create .runtime directory and copy Playbooks"]
+        I5 --> I6["Write config.env, group_vars, summary, and credentials"]
+        I6 --> I7{"INSTALL_DRY_RUN enabled"}
+        I7 -->|Yes| I8["Check generated files for CHANGE_ME"]
+        I8 --> IX
+        I7 -->|No| I9["Invoke init_ansible.sh deploy"]
+    end
+
+    subgraph INIT["init_ansible.sh - Ansible Initialization and Deployment"]
+        N0(["Start init_ansible.sh"]) --> N1{"Argument is deploy"}
+        N1 -->|No| N2["Run main initialization flow"]
+        N1 -->|Yes| N3["Run deploy_all"]
+        N3 --> N2
+        N2 --> N4["Validate configuration and delivery assets"]
+        N4 -->|Fail| NE(["Abort with error"])
+        N4 -->|Pass| N5["Check local ssh, sshpass, scp, and rsync tools"]
+        N5 --> N6["Verify offline Ansible and database assets"]
+        N6 --> N7["Configure management node and upload assets"]
+        N7 --> N8["Install Ansible and sshpass"]
+        N8 --> N9["Configure NOPASSWD sudo"]
+        N9 --> N10["Generate management-node SSH key"]
+        N10 --> N11["Distribute public key to 12 database servers"]
+        N11 --> N12["Configure database-server sudo and hostnames"]
+        N12 --> N13["Write inventory, group_vars, and ansible.cfg"]
+        N13 --> N14["Run ansible db_all -m ping"]
+        N14 -->|Ping failure| NE
+        N14 -->|Initialization complete| N15{"Deployment mode"}
+        N15 -->|Initialization only| NS(["Initialization success"])
+        N15 -->|Full deployment| N16["Run preflight Playbooks"]
+        N16 --> N17["Run Redis, RabbitMQ, MongoDB, and MySQL stages"]
+        N17 --> N18["Run postflight package audit"]
+        N18 --> N19(["Deployment success"])
+    end
+
+    subgraph TEST["run_test.sh - Reset and Test Deployment"]
+        T0(["Start run_test.sh"]) --> T1["Check ansible-playbook, reset Playbook, and runtime config"]
+        T1 --> T2{"Vault password file exists"}
+        T2 -->|Yes| T3["Validate Vault file readability and mode 600"]
+        T2 -->|No| T4["Request Vault password interactively"]
+        T3 --> T5["Run encrypted test-VM reset Playbook"]
+        T4 --> T5
+        T5 --> T6["Load fixed runtime configuration"]
+        T6 --> T7["Check TCP 22, SSH service, and credentials for all nodes"]
+        T7 -->|Failure after retries| TE(["Abort with error"])
+        T7 -->|All nodes reachable| T8["Invoke init_ansible.sh deploy"]
+    end
+
+    subgraph VERIFY["verify_delivery.sh - Delivery Validation"]
+        V0(["Start verify_delivery.sh"]) --> V1["Check required paths and delivery assets"]
+        V1 --> V2["Verify SHA256 manifest and Git LFS payloads"]
+        V2 --> V3["Validate database package layout and non-zero .deb files"]
+        V3 --> V4["Validate .deb metadata and amd64/all architecture"]
+        V4 --> V5["Run bash -n on Automation_Script shell files"]
+        V5 --> V6{"Failures detected"}
+        V6 -->|Yes| VE(["RESULT: FAILED"])
+        V6 -->|No| VS(["RESULT: PASS"])
+    end
+
+    I9 --> N0
+    N4 -.->|validate_delivery_assets invokes verifier| V0
+    T8 --> N0

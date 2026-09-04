@@ -2,7 +2,7 @@
 
 ## 1. 验收结论
 
-eCopilot 数据库高可用部署已完成测试环境的离线载荷验证、首次部署、服务启动、四类组件高可用验收、MySQL 终检和幂等重跑，可以作为独立交付项目复制并进行正式版本管理。
+eCopilot 数据库高可用部署已在 2026-09-03 完成隔离测试环境的快照恢复、SSH 门禁、离线载荷验证、首次部署、服务启动、四类组件静态健康检查、MySQL 终检和部署后 `dpkg` 审计。Redis、RabbitMQ、MongoDB 的真实故障切换与业务读写闭环尚未完成；MySQL 仅验证固定 Primary 的可写性保护和人工恢复边界，因此本报告不将静态检查表述为完整 HA 故障验收。
 
 本报告记录的是已完成的测试环境实测结果。生产环境部署时必须替换为现场受控配置，并由授权人员确认网络、账号、密码、VIP 和故障演练窗口。
 
@@ -48,11 +48,13 @@ eCopilot 数据库高可用部署已完成测试环境的离线载荷验证、�
 | Playbook syntax-check | 通过 |
 | 正式载荷同步 | Redis 2、RabbitMQ 19、MongoDB 9、MySQL 16，全部成功 |
 | 首次部署 | 通过 |
-| 重复执行 | 通过 |
+| 首次完整部署 | 通过；后续非破坏性 RabbitMQ 幂等重跑失败，需修复复测 |
 | Keepalived 幂等重跑 | `failed=0`，三节点 `changed=0` |
 | `dpkg --audit` | 12 台数据库节点均为空 |
+| 本轮隔离回归 | 13 台 VM 恢复并开机，12/12 Ansible ping，部署阶段和 Postflight 均 `unreachable=0 failed=0` |
+| 本轮总耗时 | 22m15s |
 
-## 5. 高可用验收
+## 5. 高可用静态检查
 
 ### Redis
 
@@ -92,6 +94,9 @@ eCopilot 数据库高可用部署已完成测试环境的离线载荷验证、�
 - MySQL 8.4 复制使用 `caching_sha2_password` 和 `GET_SOURCE_PUBLIC_KEY=1`；
 - GTID 验收使用 `SELECT @@gtid_executed`，兼容 MySQL 8.4。
 
+本轮 MySQL 证据还包括：两台 Replica 的 `IO=Yes`、`SQL=Yes`，
+`Seconds_Behind_Source=0`，VIP `10.20.14.59` 可达且 VIP SQL 查询确认 Primary。
+
 ## 6. 安全与系统终检
 
 - MySQL AppArmor profile 在三台节点均为 `enforce`；
@@ -100,6 +105,8 @@ eCopilot 数据库高可用部署已完成测试环境的离线载荷验证、�
 - 交付包文档不包含现场密码、私钥、Erlang Cookie 或数据库认证密钥；
 - 测试环境敏感配置保留在被 Git 忽略的受控文件中，不纳入正式 release；
 - 生产部署仍须在现场受控终端填充凭据，不得将真实凭据写入 Git。
+- 本轮测试未读取、回显或写入报告任何密码、Cookie、keyFile 或 `.runtime/config.env`
+	内容；运行态凭据审计仍按风险清单单独执行。
 
 ## 7. 已知运行边界
 
@@ -108,7 +115,10 @@ eCopilot 数据库高可用部署已完成测试环境的离线载荷验证、�
 - MySQL 使用异步 GTID 复制，存在 RPO 大于 0 的可能；
 - Keepalived 只负责 VIP 漂移，不自动将 Replica 提升为可写 Primary；
 - MySQL 主库故障后的角色提升必须由 DBA 按现场故障恢复手册人工确认和执行；
+- 本报告中的 Redis、RabbitMQ、MongoDB 结果仅证明部署后的服务、角色和集群静态状态正常，未证明真实故障后的业务读写、消息持久性或恢复重建；
 - 本报告证明测试环境交付包和自动化流程已验收，不替代生产环境上线前的现场配置核对和授权故障演练。
+- 2026-09-03 的完整部署通过不等于完整幂等重跑通过：后续非破坏性重跑在 RabbitMQ
+	种子节点持续 `activating` 后以 `exit=2` 退出，需修复并复测。
 
 ## 8. 交付文件
 

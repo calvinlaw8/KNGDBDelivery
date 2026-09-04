@@ -12,6 +12,8 @@
   hosts: mysql
   gather_facts: false
   tags: mysql, mysql-replication
+  environment:
+    MYSQL_PWD: "{{ mysql_root_password }}"
 
   tasks:
     - name: Primary - 关闭 read_only（Primary 无需只读）
@@ -22,7 +24,6 @@
           --host=127.0.0.1
           --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -e "SET GLOBAL read_only=OFF; SET GLOBAL super_read_only=OFF;"
       changed_when: false
       become: true
@@ -38,7 +39,6 @@
           --host=127.0.0.1
           --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -e "SELECT COUNT(*) FROM mysql.user WHERE User='{{ mysql_repl_user }}';"
           | tail -1
       register: repl_user_check
@@ -60,53 +60,11 @@
           --host=127.0.0.1
           --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -e "
             CREATE USER '{{ mysql_repl_user }}'@'%'
             IDENTIFIED WITH caching_sha2_password
             BY '{{ mysql_repl_password }}';
             GRANT REPLICATION SLAVE ON *.* TO '{{ mysql_repl_user }}'@'%';
-            FLUSH PRIVILEGES;
-          "
-      become: true
-      no_log: true
-
-    - name: 检查 root@'%' 远程管理账号是否已存在
-      ansible.builtin.shell:
-        cmd: >
-          {{ mysql_client_bin }}
-          --protocol=TCP
-          --host=127.0.0.1
-          --port={{ mysql_port }}
-          -u root
-          -p"{{ mysql_root_password }}"
-          -e "SELECT COUNT(*) FROM mysql.user WHERE User='root' AND Host='%';"
-          | tail -1
-      register: root_remote_check
-      changed_when: false
-      become: true
-      no_log: true
-      when: inventory_hostname == mysql_primary_ip
-      run_once: true
-
-    - name: 创建 root@'%' 远程管理账号（若不存在）
-      when:
-        - inventory_hostname == mysql_primary_ip
-        - root_remote_check.stdout | trim | int == 0
-      run_once: true
-      ansible.builtin.shell:
-        cmd: >
-          {{ mysql_client_bin }}
-          --protocol=TCP
-          --host=127.0.0.1
-          --port={{ mysql_port }}
-          -u root
-          -p"{{ mysql_root_password }}"
-          -e "
-            CREATE USER 'root'@'%'
-            IDENTIFIED WITH caching_sha2_password
-            BY '{{ mysql_root_password }}';
-            GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
             FLUSH PRIVILEGES;
           "
       become: true
@@ -120,12 +78,11 @@
           --host=127.0.0.1
           --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -NBe "SELECT @@gtid_executed;"
       register: master_status
       changed_when: false
       become: true
-      no_log: false
+      no_log: true
       when: inventory_hostname == mysql_primary_ip
       run_once: true
 
@@ -140,6 +97,8 @@
   hosts: mysql
   gather_facts: false
   tags: mysql, mysql-replication
+  environment:
+    MYSQL_PWD: "{{ mysql_root_password }}"
 
   tasks:
     - name: Replica 节点 - 配置并启动 GTID 复制
@@ -153,7 +112,6 @@
               --host=127.0.0.1
               --port={{ mysql_port }}
               -u root
-              -p"{{ mysql_root_password }}"
               -e "SHOW REPLICA STATUS\G"
           register: repl_status
           changed_when: false
@@ -170,7 +128,6 @@
               --host=127.0.0.1
               --port={{ mysql_port }}
               -u root
-              -p"{{ mysql_root_password }}"
               -e "
                 STOP REPLICA;
                 RESET REPLICA ALL;
@@ -194,7 +151,6 @@
               --host=127.0.0.1
               --port={{ mysql_port }}
               -u root
-              -p"{{ mysql_root_password }}"
               -e "SET GLOBAL read_only=ON;"
           changed_when: false
           become: true
@@ -213,7 +169,6 @@
               --host=127.0.0.1
               --port={{ mysql_port }}
               -u root
-              -p"{{ mysql_root_password }}"
               -e "SHOW REPLICA STATUS\G"
           register: io_running
           changed_when: false
@@ -229,7 +184,6 @@
               --host=127.0.0.1
               --port={{ mysql_port }}
               -u root
-              -p"{{ mysql_root_password }}"
               -e "SHOW REPLICA STATUS\G"
           register: sql_running
           changed_when: false

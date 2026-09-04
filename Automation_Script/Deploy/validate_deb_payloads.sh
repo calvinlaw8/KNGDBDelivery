@@ -76,6 +76,10 @@ for component in redis rabbitmq mongodb mysql; do
     fail "${component}: 存在非 .deb 文件：${non_deb_file}"
   done < <(find "${component_dir}" -maxdepth 1 -type f ! -name '*.deb' -print0)
 
+  while IFS= read -r -d '' nested_dir; do
+    fail "${component}: 存在嵌套目录：${nested_dir}"
+  done < <(find "${component_dir}" -mindepth 1 -type d -print0)
+
   package_found=0
   for package_file in "${deb_files[@]}"; do
     package_name=$(dpkg-deb -f "${package_file}" Package 2>/dev/null || true)

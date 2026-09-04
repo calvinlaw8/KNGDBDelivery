@@ -37,18 +37,17 @@
       no_log: true
       notify: restart rabbitmq-server
 
-    - name: 种子节点 - 启动 rabbitmq-server 并设为开机自启
+    - name: 启动 rabbitmq-server 并设为开机自启
       ansible.builtin.shell:
         cmd: >-
           systemctl daemon-reload &&
           systemctl enable rabbitmq-server &&
           systemctl start --no-block rabbitmq-server
       changed_when: true
-      when: inventory_hostname == rabbitmq_seed_node_ip
       become: true
 
     - name: 等待种子节点 RabbitMQ 完全启动
-      ansible.builtin.command: systemctl is-active rabbitmq-server
+      ansible.builtin.command: timeout 10s systemctl is-active rabbitmq-server
       register: rmq_seed_active
       changed_when: false
       until: rmq_seed_active.rc == 0 and rmq_seed_active.stdout == "active"
@@ -139,6 +138,9 @@
               grep -c "{{ rabbitmq_node_prefix }}" || true
           register: cluster_members
           changed_when: false
+          until: cluster_members.stdout | int >= 2
+          retries: 12
+          delay: 5
           failed_when: cluster_members.stdout | int < 2
           become: true
 

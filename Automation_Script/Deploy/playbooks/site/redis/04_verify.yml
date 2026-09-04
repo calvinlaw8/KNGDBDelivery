@@ -10,6 +10,8 @@
   hosts: redis
   gather_facts: false
   tags: redis, redis-verify
+  environment:
+    REDISCLI_AUTH: "{{ redis_password }}"
 
   tasks:
     - name: 检查 redis-server 服务状态
@@ -29,11 +31,12 @@
     - name: 验证主从复制（info replication）
       ansible.builtin.shell:
         cmd: >
-          redis-cli -p {{ redis_port }} -a {{ redis_password }} --no-auth-warning
+          redis-cli -p {{ redis_port }} --no-auth-warning
           info replication | grep -E 'role:|connected_slaves:|master_host:'
       register: replication_info
       changed_when: false
       become: true
+      no_log: true
 
     - name: 显示复制状态
       ansible.builtin.debug:
@@ -54,6 +57,7 @@
       register: sentinel_masters
       changed_when: false
       become: true
+      no_log: true
       when: inventory_hostname == redis_master_ip
 
     - name: 显示 Sentinel 监控摘要
@@ -70,6 +74,7 @@
       changed_when: false
       failed_when: slave_count.stdout | int < 2
       become: true
+      no_log: true
       when: inventory_hostname == redis_master_ip
 
     - name: 验证通过摘要

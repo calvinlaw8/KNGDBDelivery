@@ -445,4 +445,6 @@
 
     - name: 显示节点初始化结果
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }}: mysqld = {{ mysqld_active.stdout }}, server_id = {{ my_server_id }}"
+        msg: >-
+          {{ inventory_hostname }}: mysqld = {{ mysqld_active.stdout }},
+          server_id = {{ (mysql_nodes | selectattr('ip', 'equalto', inventory_hostname) | list | first).server_id }}

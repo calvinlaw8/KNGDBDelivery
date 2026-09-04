@@ -82,6 +82,18 @@ sudo_run() {
     ssh_run "sudo -S -p '' bash -c $(printf '%q' "${command}")"
 }
 
+sudo_script_run() {
+  local script="$1"
+  if ssh_run "sudo -n true" >/dev/null 2>&1; then
+    printf '%s\n' "${script}" | ssh_run "sudo -n bash -s"
+  else
+    {
+      printf '%s\n' "${ANSIBLE_NODE_PASS}"
+      printf '%s\n' "${script}"
+    } | ssh_run "sudo -S -p '' bash -s"
+  fi
+}
+
 # ============================================================
 # ── 安装阶段 ────────────────────────────────────────────────
 # ============================================================
@@ -217,10 +229,19 @@ step2b_upload_playbooks() {
 
   # 将 group_vars 同步到 /etc/ansible/group_vars/，确保所有子目录 playbook 都能找到变量
   if ssh_run "test -d '${REMOTE_PLAYBOOK_DIR}/group_vars'" 2>/dev/null; then
-    ssh_run "printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S mkdir -p /etc/ansible/group_vars && \
-             printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S cp '${REMOTE_PLAYBOOK_DIR}/group_vars/'*.yml /etc/ansible/group_vars/ && \
-             printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S chown root:root /etc/ansible/group_vars/*.yml && \
-             printf '%s\n' '${ANSIBLE_NODE_PASS}' | sudo -S chmod 0644 /etc/ansible/group_vars/*.yml"
+    sudo_script_run "$(cat <<EOF
+set -e
+mkdir -p /etc/ansible/group_vars
+cp '${REMOTE_PLAYBOOK_DIR}/group_vars/'*.yml /etc/ansible/group_vars/
+chown root:sysadmin /etc/ansible/group_vars/*.yml
+chmod 0640 /etc/ansible/group_vars/*.yml
+source_files=\$(find '${REMOTE_PLAYBOOK_DIR}/group_vars' -maxdepth 1 -type f -name '*.yml' -exec basename {} \\; | sort)
+target_files=\$(find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' -exec basename {} \\; | sort)
+test "\${source_files}" = "\${target_files}"
+test -z "\$(find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' ! -user root -o -type f -name '*.yml' ! -group sysadmin)"
+test -z "\$(find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' ! -perm 0640)"
+EOF
+)"
     ok "group_vars → /etc/ansible/group_vars/ 同步完成"
   fi
 }
@@ -514,11 +535,17 @@ step7_inventory() {
 step7b_group_vars() {
   info "7b" "同步 group_vars → /etc/ansible/group_vars"
 
-  ssh_run "sudo mkdir -p /etc/ansible/group_vars && \
-           sudo cp ${REMOTE_PLAYBOOK_DIR}/group_vars/*.yml /etc/ansible/group_vars/ 2>/dev/null && \
-           sudo chown root:root /etc/ansible/group_vars/*.yml && \
-           sudo chmod 0644 /etc/ansible/group_vars/*.yml && echo DONE || echo SKIP"
-  ok "group_vars 已同步"
+  ssh_run "set -e
+           sudo mkdir -p /etc/ansible/group_vars
+           sudo cp '${REMOTE_PLAYBOOK_DIR}/group_vars/'*.yml /etc/ansible/group_vars/
+           sudo chown root:sysadmin /etc/ansible/group_vars/*.yml
+           sudo chmod 0640 /etc/ansible/group_vars/*.yml
+           source_files=\$(find '${REMOTE_PLAYBOOK_DIR}/group_vars' -maxdepth 1 -type f -name '*.yml' -exec basename {} \\; | sort)
+           target_files=\$(sudo find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' -exec basename {} \\; | sort)
+           test \"\${source_files}\" = \"\${target_files}\"
+           test -z \"\$(sudo find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' ! -user root -o -type f -name '*.yml' ! -group sysadmin)\"
+           test -z \"\$(sudo find /etc/ansible/group_vars -maxdepth 1 -type f -name '*.yml' ! -perm 0640)\""
+  ok "group_vars 已同步并通过 root:sysadmin/0640 权限校验"
 }
 
 # Step 8: 写入 ansible.cfg

@@ -17,7 +17,7 @@
 
 部署架构保持为 Redis 主从 + Sentinel、RabbitMQ 三节点、MongoDB `rs0` 三节点副本集、MySQL GTID 异步主从 + Keepalived VIP。
 
-> 当前正式离线载荷共 46 个包（Redis 2、RabbitMQ 19、MongoDB 9、MySQL/Keepalived 16）。四类组件均已完成真实安装和 HA 验收；MySQL GTID 复制、Keepalived VIP、AppArmor 和 dpkg 终检通过；Keepalived 幂等重跑为 `changed=0`。完整结论见 `验收记录/eCopilot 最终验收报告.md`。
+> 当前正式离线载荷共 46 个包（Redis 2、RabbitMQ 19、MongoDB 9、MySQL/Keepalived 16）。四类组件均已完成测试环境真实安装、服务启动和静态健康检查；MySQL GTID 复制、Keepalived VIP、AppArmor 和 dpkg 终检通过；Keepalived 幂等重跑为 `changed=0`。Redis、RabbitMQ、MongoDB 的真实故障切换与业务读写闭环仍需独立演练，不能将本段表述为完整 HA 故障验收。完整结论见 `验收记录/eCopilot 最终验收报告.md`。
 
 部署节点负责执行 Ansible，数据库节点位于客户内网。安装阶段不依赖公网软件源，所有安装包均从本交付包分发。
 
@@ -92,7 +92,7 @@ bash init_ansible.sh deploy
 3. 数据库节点之间的主机名解析、SSH、组件端口和集群通信端口已放通。
 4. 现场已确认节点 IP、主机名、网卡名、VIP、账号和密码，并由授权人员保管。
 5. 已确认统一安装方式，并准备好四类组件对应的完整离线载荷、依赖闭包和 SHA256 校验值；当前正式载荷共 46 个包，清单见 `sha256-packages.txt`。
-6. 已安排断网条件下的首次部署、重复执行和故障演练窗口；正式测试环境的首次部署、服务启动、HA 验收和幂等重跑已完成，生产环境仍须替换为现场受控配置后执行。
+6. 已安排断网条件下的首次部署、重复执行和故障演练窗口；当前正式测试环境的首次部署和服务启动已完成，RabbitMQ 修复后的完整幂等重跑及 Redis、RabbitMQ、MongoDB 真实故障演练仍待完成，生产环境仍须替换为现场受控配置后执行。
 
 ### 权限硬要求验证
 
