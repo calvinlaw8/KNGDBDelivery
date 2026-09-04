@@ -71,12 +71,15 @@
   hosts: localhost
   gather_facts: false
   tags: preflight
+  vars:
+    selected_components_effective: "{{ selected_components | default('redis,rabbitmq,mongodb,mysql') }}"
 
   tasks:
     - name: 检查 Redis 离线包目录
       ansible.builtin.stat:
         path: "{{ redis_pkg_dir }}"
       register: redis_pkg_stat
+      when: "'redis' in selected_components_effective"
 
     - name: 断言 Redis 离线包目录存在
       ansible.builtin.assert:
@@ -85,11 +88,13 @@
           Redis 离线包目录不存在：{{ redis_pkg_dir }}
           请先执行 SCP 将 Redis .deb 包上传至 Ansible-01
         success_msg: "Redis 包目录就绪：{{ redis_pkg_dir }}"
+      when: "'redis' in selected_components_effective"
 
     - name: 检查 RabbitMQ 离线包目录
       ansible.builtin.stat:
         path: "{{ rabbitmq_pkg_dir }}"
       register: rmq_pkg_stat
+      when: "'rabbitmq' in selected_components_effective"
 
     - name: 断言 RabbitMQ 离线包目录存在
       ansible.builtin.assert:
@@ -98,11 +103,13 @@
           RabbitMQ 离线包目录不存在：{{ rabbitmq_pkg_dir }}
           请先执行 SCP 将 RabbitMQ .deb 包上传至 Ansible-01
         success_msg: "RabbitMQ 包目录就绪：{{ rabbitmq_pkg_dir }}"
+      when: "'rabbitmq' in selected_components_effective"
 
     - name: 检查 MongoDB 离线包目录
       ansible.builtin.stat:
         path: "{{ mongodb_pkg_dir }}"
       register: mongo_pkg_stat
+      when: "'mongodb' in selected_components_effective"
 
     - name: 断言 MongoDB 离线包目录存在
       ansible.builtin.assert:
@@ -111,11 +118,13 @@
           MongoDB 离线包目录不存在：{{ mongodb_pkg_dir }}
           请先执行 SCP 将 MongoDB .deb 包上传至 Ansible-01
         success_msg: "MongoDB 包目录就绪：{{ mongodb_pkg_dir }}"
+      when: "'mongodb' in selected_components_effective"
 
     - name: 检查 MySQL 离线包目录
       ansible.builtin.stat:
         path: "{{ mysql_pkg_dir }}"
       register: mysql_pkg_stat
+      when: "'mysql' in selected_components_effective"
 
     - name: 断言 MySQL 离线包目录存在
       ansible.builtin.assert:
@@ -124,12 +133,13 @@
           MySQL 离线包目录不存在：{{ mysql_pkg_dir }}
           请先执行 SCP 将 MySQL .deb 包上传至 Ansible-01
         success_msg: "MySQL 包目录就绪：{{ mysql_pkg_dir }}"
+      when: "'mysql' in selected_components_effective"
 
     - name: 验证正式离线 .deb 载荷版本与元数据
       ansible.builtin.command:
         cmd: >-
           env PACKAGE_ROOT={{ staging_dir }}
-          bash {{ playbook_dir }}/../../validate_deb_payloads.sh
+          bash {{ playbook_dir }}/../../validate_deb_payloads.sh --components {{ selected_components_effective }}
       register: payload_validation
       changed_when: false
 
@@ -141,6 +151,6 @@
       ansible.builtin.debug:
         msg: >-
           前置检查全部通过 ✅
-          - 12 台节点：可达 + sudo 正常
-          - 正式离线载荷：redis / rabbitmq / mongodb / mysql 均通过目标版本与 amd64 元数据检查
+          - 选中节点：可达 + sudo 正常
+          - 正式离线载荷：{{ selected_components_effective }} 均通过目标版本与 amd64 元数据检查
           下一步：ansible-playbook 01_server_init.yml

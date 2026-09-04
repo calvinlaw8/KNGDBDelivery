@@ -135,6 +135,23 @@
         path: "{{ mysql_data_dir }}/mysql"
       register: mysql_db_dir
 
+    - name: 检查未初始化数据目录是否为空
+      ansible.builtin.find:
+        paths: "{{ mysql_data_dir }}"
+        hidden: true
+        recurse: false
+      register: mysql_uninitialized_data_files
+      when: not mysql_db_dir.stat.exists
+      become: true
+
+    - name: 拒绝删除非空且未初始化的 MySQL 数据目录
+      ansible.builtin.assert:
+        that: mysql_uninitialized_data_files.matched | int == 0
+        fail_msg: >-
+          {{ inventory_hostname }} 的 {{ mysql_data_dir }} 非空但未发现 mysql 系统库；
+          为保护既有或失败残留数据，部署不会自动删除该目录。请由授权人员确认后按重建流程处理。
+      when: not mysql_db_dir.stat.exists
+
     - name: 初始化 MySQL 数据目录（mysqld --initialize，约 30-60 秒，每 10 秒汇报一次）
       ansible.builtin.file:
         path: "{{ mysql_data_dir }}"

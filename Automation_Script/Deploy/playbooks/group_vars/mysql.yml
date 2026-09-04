@@ -40,6 +40,10 @@ mysql_nodes:
 mysql_root_password: "CHANGE_ME"
 mysql_repl_user: "repl"
 mysql_repl_password: "CHANGE_ME"
+mysql_vip_verify_user: "ecopilot_vip_verify"
+# SQL 验证在 Primary 节点经 VIP 执行；由向导写入 Primary 精确 IP。
+mysql_vip_verify_host: "CHANGE_ME"
+mysql_vip_verify_password: "CHANGE_ME"
 
 # Keepalived VIP 配置
 mysql_vip: "CHANGE_ME"

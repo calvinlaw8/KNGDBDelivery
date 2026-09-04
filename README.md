@@ -4,20 +4,20 @@
 
 本项目是面向客户内网环境的正式交付包，用于通过 Ansible 在 Ubuntu 24.04.x 服务器上离线部署四类数据库和中间件高可用组件。本包只包含正式部署资产，不包含历史包、真实配置或临时文件。项目要求版本和统一安装口径如下：
 
-测试环境需要从快照恢复后再做完整复现时，请按 [自动化部署测试流程.md](自动化部署测试流程.md) 执行。该流程的重置入口仅用于明确隔离的测试设备；普通 `install.sh` 和 `init_ansible.sh deploy` 不会自动重置服务器。
+测试环境必须使用明确隔离的测试设备和受控测试流程；普通 `install.sh` 和 `init_ansible.sh deploy` 不会自动重置服务器。测试重置脚本和测试记录属于仓库内部材料，不纳入客户交付包。
 
-| 服务器名称 | 操作系统 | 组件版本 | Docker 版本 |
-|---|---|---:|---|
-| Redis 服务器 | Ubuntu 24.04 LTS | Redis 8.2.8 | 不使用 |
-| RabbitMQ 服务器 | Ubuntu 24.04 LTS | RabbitMQ 4.2.9 | 不使用 |
-| MongoDB 服务器 | Ubuntu 24.04 LTS | MongoDB 8.2.12 | 不使用 |
-| MySQL 服务器 | Ubuntu 24.04 LTS | MySQL 8.4.11 | 不使用 |
+| 服务器名称      | 操作系统         |       组件版本 | Docker 版本 |
+| --------------- | ---------------- | -------------: | ----------- |
+| Redis 服务器    | Ubuntu 24.04 LTS |    Redis 8.2.8 | 不使用      |
+| RabbitMQ 服务器 | Ubuntu 24.04 LTS | RabbitMQ 4.2.9 | 不使用      |
+| MongoDB 服务器  | Ubuntu 24.04 LTS | MongoDB 8.2.12 | 不使用      |
+| MySQL 服务器    | Ubuntu 24.04 LTS |   MySQL 8.4.11 | 不使用      |
 
 第三方组件统一采用 Ubuntu 24.04 amd64 `.deb` 系统软件包方式，由 Ansible 或部署脚本离线自动化安装。四类组件必须使用同一种方式，禁止混用；目标版本载荷、依赖闭包和 Ubuntu 24.04 LTS 兼容性仍须在正式准备阶段逐项验证。
 
 部署架构保持为 Redis 主从 + Sentinel、RabbitMQ 三节点、MongoDB `rs0` 三节点副本集、MySQL GTID 异步主从 + Keepalived VIP。
 
-> 当前正式离线载荷共 46 个包（Redis 2、RabbitMQ 19、MongoDB 9、MySQL/Keepalived 16）。四类组件均已完成测试环境真实安装、服务启动和静态健康检查；MySQL GTID 复制、Keepalived VIP、AppArmor 和 dpkg 终检通过；Keepalived 幂等重跑为 `changed=0`。Redis、RabbitMQ、MongoDB 的真实故障切换与业务读写闭环仍需独立演练，不能将本段表述为完整 HA 故障验收。完整结论见 `验收记录/eCopilot 最终验收报告.md`。
+> 当前正式离线载荷共 46 个包（Redis 2、RabbitMQ 19、MongoDB 9、MySQL/Keepalived 16）。四类组件均已完成测试环境真实安装、服务启动和静态健康检查；MySQL GTID 复制、Keepalived VIP、AppArmor 和 dpkg 终检通过；Keepalived 幂等重跑为 `changed=0`。Redis、RabbitMQ、MongoDB 的真实故障切换与业务读写闭环仍需独立演练，不能将本段表述为完整 HA 故障验收。
 
 部署节点负责执行 Ansible，数据库节点位于客户内网。安装阶段不依赖公网软件源，所有安装包均从本交付包分发。
 
@@ -51,9 +51,9 @@ bash Automation_Script/Deploy/install.sh
 
 整组录入节点时会先连续录入 3 个节点 IP，再设置主机名前缀。普通前缀例如 `redis-node`，节点输入 `1`、`2`、`3` 会生成 `redis-node1`、`redis-node2`、`redis-node3`；以数字结尾的前缀例如 `T-Redis-0`，节点输入 `1`、`2`、`3` 会生成 `T-Redis-01`、`T-Redis-02`、`T-Redis-03`。节点主机名输入项也可以直接输入完整主机名；留空前缀则逐台输入完整主机名。所有节点主机名必须唯一。
 
-向导运行过程中按提示完成信息采集即可，不需要另外编辑 `config.env`。当前测试环境需要输入 1 台 Ansible 管理节点、Redis/RabbitMQ/MongoDB/MySQL 各 3 台节点、数据库服务器上的 Linux 系统登录账号和密码（用于 SSH 登录服务器、上传文件及执行部署，不是 MySQL/MongoDB/Redis/RabbitMQ 数据库账号），以及各组件运行密码和 MySQL VIP；密码通过隐藏输入并要求二次确认。全部参数输入完成后会显示一次总览，并在部署前校验 IP、主机名、重复节点和 VIP 冲突。确认阶段输入 `n` 可进入修改菜单：选择数据库节点组后，还可以只修改节点 1/2/3 或整组重录；修改节点时显示原值，直接回车保留原值。管理节点、数据库服务器 SSH 登录信息和四类组件凭据也可以分别修改，输入 `0` 可取消部署。完成所选修改后会自动返回总览，只有输入 `y` 或直接回车确认后才会生成运行时配置并开始部署；输入 `q` 可在最终确认阶段取消。
+向导运行过程中按提示完成信息采集即可，不需要另外编辑 `config.env`。当前测试环境需要输入 1 台 Ansible 管理节点、Redis/RabbitMQ/MongoDB/MySQL 各 3 台节点、数据库服务器上的 Linux 系统登录账号和密码（用于 SSH 登录服务器、上传文件及执行部署，不是 MySQL/MongoDB/Redis/RabbitMQ 数据库账号），以及各组件运行密码、MySQL VIP 和独立的 MySQL VIP 验证账号密码；密码通过隐藏输入并要求二次确认。VIP 验证 SQL 在 Primary 节点经 VIP 执行，因此验证账号仅允许 Primary 精确 IP 来源访问，不复用 root 密码；管理节点仅负责 VIP 网络可达性检查。全部参数输入完成后会显示一次总览，并在部署前校验 IP、主机名、重复节点和 VIP 冲突。确认阶段输入 `n` 可进入修改菜单：选择数据库节点组后，还可以只修改节点 1/2/3 或整组重录；修改节点时显示原值，直接回车保留原值。管理节点、数据库服务器 SSH 登录信息和四类组件凭据也可以分别修改，输入 `0` 可取消部署。完成所选修改后会自动返回总览，只有输入 `y` 或直接回车确认后才会生成运行时配置并开始部署；输入 `q` 可在最终确认阶段取消。
 
-向导生成的运行时配置、完整凭据清单和安装摘要位于 `Automation_Script/Deploy/.runtime/`，目录权限为 `700`，敏感文件权限为 `600`，已被 Git 忽略。完整凭据清单 `credentials.txt` 包含管理节点 SSH、数据库服务器 SSH、四类组件服务凭据、RabbitMQ Cookie、MySQL Keepalived 认证、节点 IP/主机名和 VIP；MongoDB keyFile 由 Playbook 自动生成并分发到各节点，不需要手工输入。安装结束后，终端只显示文件位置，不显示明文凭据。请仅由授权人员查看：`less Automation_Script/Deploy/.runtime/credentials.txt`。不得复制到终端、操作日志、验收报告或 Git；移交客户密码管理器后，应清理本地 `.runtime/` 并轮换已交付凭据。
+向导生成的运行时配置、完整凭据清单和安装摘要位于 `Automation_Script/Deploy/.runtime/`，目录权限为 `700`，敏感文件权限为 `600`，已被 Git 忽略。完整凭据清单 `credentials.txt` 包含管理节点 SSH、数据库服务器 SSH、四类组件服务凭据、RabbitMQ Cookie、MySQL Keepalived 认证、节点 IP/主机名和 VIP；MongoDB keyFile 由 Playbook 自动生成并分发到各节点，不需要手工输入。安装结束后，终端只显示文件位置，不显示明文凭据。请仅由授权人员查看：`less Automation_Script/Deploy/.runtime/credentials.txt`。不得复制到终端、现场记录或 Git；移交客户密码管理器后，应清理本地 `.runtime/` 并轮换已交付凭据。
 
 需要自动化或已有受控配置时，仍可使用原入口：
 
@@ -78,9 +78,8 @@ bash init_ansible.sh deploy
 │       ├── preflights/                    # 前置检查和服务器初始化
 │       └── site/                          # Redis/RabbitMQ/MongoDB/MySQL Playbook
 ├── 离线安装包/                             # 统一安装方式对应的离线载荷
-├── 验收记录/                               # 部署验收记录模板
 ├── 版本清单与SHA256.md                     # 版本和完整性校验说明
-└── 操作日志.md                             # 本交付包操作记录
+└── sha256-packages.txt                     # 离线载荷 SHA256 校验清单
 ```
 
 ## 3. 部署前提
@@ -116,7 +115,7 @@ ssh root@<节点IP> 'id -u'
 
 1. 编辑 `Automation_Script/Deploy/config.env`，填写控制节点、目标节点和网络参数。
 2. 编辑 `Automation_Script/Deploy/playbooks/group_vars/` 下的组件变量文件，填写拓扑、版本和凭据。
-3. 真实密码不得写入 README、操作日志、命令行参数或 Git；应使用现场受控配置或受控终端输入。
+3. 真实密码不得写入 README、现场记录、命令行参数或 Git；应使用现场受控配置或受控终端输入。
 4. 检查每个 `CHANGE_ME` 均已替换，并确认没有重复 IP、重复主机名或 VIP 与节点地址冲突。
 5. 在统一安装方式、依赖和自动化安装流程完成离线验证前，不得执行生产部署。
 
@@ -143,9 +142,34 @@ bash Automation_Script/Deploy/init_ansible.sh
 bash Automation_Script/Deploy/init_ansible.sh deploy
 ```
 
+`deploy` 会在任何 SSH、软件安装或远端配置变更前展示组件、目标节点、选中组件离线载荷版本、控制面写入范围和数据保护边界，并要求明确输入 `y` 才继续。受控自动化需显式传入 `--yes`，例如 `bash Automation_Script/Deploy/init_ansible.sh deploy --components mongodb --yes`；未传入 `--yes` 的非交互执行会安全退出。`verify` 属于非变更验证，不要求该确认。
+
 如果现场需要分阶段执行，应按照 `Automation_Script/Deploy/playbooks/site/` 下各组件的操作说明执行 preflight、安装、配置和验证 Playbook，不要跳过前置检查或直接执行组件配置。
 
-### 5.3 重复执行检查
+控制面文件按组件归属块维护：局部部署只更新所选组件对应的 `/etc/hosts` 映射和 Ansible inventory 组，保留其他组件块，并在写入前检查标记配对、地址和主机名唯一性、inventory 解析及候选差异。若管理节点仍有旧版全局受管块，必须先用完整四组件拓扑完成一次迁移；局部部署会安全停止。
+
+### 5.3 选择组件与失败后继续
+
+正式入口支持选择需要执行的组件；未选组件不会执行对应安装、配置或验证 Playbook，也不会被自动卸载、重装或回退：
+
+```bash
+# 仅部署 MongoDB
+bash Automation_Script/Deploy/init_ansible.sh deploy --components mongodb
+
+# 从 MongoDB 开始继续，依次执行 MongoDB 与 MySQL
+bash Automation_Script/Deploy/init_ansible.sh deploy --from mongodb
+
+# 仅检查 MongoDB 运行状态与相关节点 dpkg 状态，不执行安装或配置
+bash Automation_Script/Deploy/init_ansible.sh verify --components mongodb
+```
+
+组件顺序固定为 Redis、RabbitMQ、MongoDB、MySQL。某一组件失败时，入口停止后续组件，并按操作类型在 `.runtime/state/` 写入 `组件.deploy.failed` 或 `组件.verify.failed`；组件验证成功后写入对应的 `.verified`。状态文件仅保存操作类型、阶段、日志路径、选中组件的节点拓扑摘要、离线载荷清单摘要和入口脚本摘要，不保存凭据或完整配置哈希。状态仅用于定位和继续部署，不会使入口自动跳过实际预检或服务验证；配置、载荷或脚本摘要变化时，既有记录只可作为排障线索，不能作为续装判断依据。使用向导时，如本机已有 `.runtime/`，启动菜单可选择“使用既有配置继续部署”。
+
+`verify --components` 只执行选中节点的 Preflight、组件运行状态验证和 `dpkg` 审计，不执行安装、配置、重建或数据清理；该入口会受控写入本地日志和 checkpoint，因此属于非变更验证而非绝对只读。首次交互向导当前仍要求录入四个组件的完整拓扑。即使使用受控 `config.env` 的正式入口，首次局部部署也必须填写四个组件的完整有效拓扑，不能保留 `CHANGE_ME`、缺失 IP 或缺失主机名；首次局部录入必须等待 hosts 和 inventory 的增量合并能力完成后才会提供。
+
+选择组件后，部署入口只向所选组件节点分发公钥、配置临时 sudo、设置主机名并执行连通性检查；离线包同步、Preflight 和组件 Playbook 也只处理所选组件。管理节点的 `/etc/hosts` 与 Ansible inventory 仍维护现场已配置的完整拓扑，避免后续从失败组件继续时移除已部署组件的控制面映射；执行 Playbook 时通过 Ansible `--limit` 确保未选节点不被连接或修改。
+
+### 5.4 重复执行检查
 
 首次部署完成后，在不改变配置的情况下再次执行相关 Playbook，确认：
 
@@ -154,20 +178,27 @@ bash Automation_Script/Deploy/init_ansible.sh deploy
 - 服务保持正常运行；
 - Ansible 输出不存在新的非预期变更。
 
+### 5.5 生产环境回退与重装边界
+
+本交付包提供失败停止、阶段日志、组件级安全重试和显式继续部署；不提供跨组件事务回滚，也不会自动恢复服务器到安装前状态。临时 sudo 授权、临时脚本和敏感临时文件会在流程退出时清理，但已安装软件包、受管配置、系统用户、服务状态和数据库集群状态不会被自动撤销。
+
+生产恢复必须区分以下操作：
+
+| 操作 | 当前支持 | 默认数据策略 |
+| --- | --- | --- |
+| 从失败组件继续 | 支持 `--from` 或向导续装 | 保留数据 |
+| 指定组件重跑 | 支持 `--components` | 保留数据 |
+| 卸载但保留数据 | 尚未自动化 | 必须人工授权 |
+| 清空数据并重建 | 尚未自动化 | 必须人工授权 |
+| 恢复到安装前完整状态 | 不由本交付包自动提供 | 依赖现场快照或备份 |
+
+MongoDB 副本集、RabbitMQ Mnesia、MySQL GTID 与数据目录均不是可由普通包卸载无损还原的状态。生产变更前应由现场创建 VM 或磁盘快照，并确认数据库备份及恢复责任人；现场没有快照能力时，只能按受管配置和显式恢复手册尽力恢复，不能承诺回到安装前状态。
+
+MySQL 初始化前会检查数据目录：已存在 `mysql` 系统库时保留数据；目录不存在或为空时才可初始化；目录非空但未识别为已初始化时会失败停止，绝不自动删除失败残留或既有数据。该场景必须由授权人员确认后按重建流程处理。
+
 ## 6. 验收要求
 
-验收记录和最终实测结果见 `验收记录/`，至少包括：
-
-- 四类组件版本和服务状态；
-- Redis 主从状态、Sentinel 状态和故障切换结果；
-- RabbitMQ 3 节点集群状态、Disk Node 数量和 Management Plugin 状态；
-- MongoDB `rs.status().ok`、Primary/Secondary 角色和 keyFile 权限；
-- MySQL GTID、复制线程、`read_only` 状态和 Keepalived VIP 归属；
-- 断网部署结果、重复执行结果、故障演练结果和遗留问题。
-
-当前正式测试验收结论：四类组件部署成功，服务与 HA 状态正常；正式包校验、三节点数据库/中间件验收、MySQL/AppArmor/dpkg 终检均通过。MySQL 为异步 GTID 主从，Keepalived 只负责 VIP 漂移，不自动提升 Replica，属于已知运行边界。
-
-验收时不得把真实密码写入验收报告；命令输出中如包含凭据或敏感地址，应在归档前脱敏。
+部署完成后应由现场按自身变更管理流程记录四类组件版本、服务状态、复制状态、VIP 归属和遗留问题。MySQL 为异步 GTID 主从，Keepalived 只负责 VIP 漂移，不自动提升 Replica，属于已知运行边界。
 
 ## 7. 高可用边界
 
@@ -187,7 +218,7 @@ bash Automation_Script/Deploy/init_ansible.sh deploy
 - 数据库安装阶段禁止使用公网下载或在线安装命令。
 - 不得在脚本、Playbook、README 或 Git 中提交生产密码、私钥、Cookie 或 API Key。
 - 交付包复制、解压和执行过程中应限制目录权限，部署完成后清理临时凭据和安装包副本。
-- 生产执行前后保留操作日志，但日志内容必须脱敏。
+- 生产执行前后由客户按变更管理要求保留脱敏现场记录。
 - 任何破坏性操作、数据清理或故障提升操作必须由现场授权人员确认。
 
 ## 9. 版本与完整性
@@ -205,5 +236,3 @@ find 离线安装包 -type f -print0 | sort -z | xargs -0 shasum -a 256 > sha256
 ## 10. 相关文档
 
 - [版本清单与SHA256.md](版本清单与SHA256.md)
-- [验收记录/eCopilot 验收记录模板.md](验收记录/eCopilot%20验收记录模板.md)
-- [验收记录/eCopilot 最终验收报告.md](验收记录/eCopilot%20最终验收报告.md)

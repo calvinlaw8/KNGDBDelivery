@@ -31,6 +31,44 @@
       when: inventory_hostname == mysql_primary_ip
       run_once: true
 
+    - name: 创建仅限集群内 VIP 验证的账户
+      when: inventory_hostname == mysql_primary_ip
+      run_once: true
+      no_log: true
+      block:
+        - name: 写入临时 VIP 验证账户 SQL
+          ansible.builtin.copy:
+            dest: /run/ecopilot-mysql-vip-verify.sql
+            content: |
+              CREATE USER IF NOT EXISTS '{{ mysql_vip_verify_user }}'@'{{ mysql_vip_verify_host }}'
+                IDENTIFIED WITH caching_sha2_password
+                BY '{{ mysql_vip_verify_password | replace("'", "''") }}';
+              ALTER USER '{{ mysql_vip_verify_user }}'@'{{ mysql_vip_verify_host }}'
+                IDENTIFIED WITH caching_sha2_password
+                BY '{{ mysql_vip_verify_password | replace("'", "''") }}';
+              GRANT USAGE ON *.* TO '{{ mysql_vip_verify_user }}'@'{{ mysql_vip_verify_host }}';
+              FLUSH PRIVILEGES;
+            owner: root
+            group: root
+            mode: "0600"
+          become: true
+
+        - name: 执行临时 VIP 验证账户 SQL
+          ansible.builtin.shell:
+            cmd: >
+              {{ mysql_client_bin }} --protocol=TCP --host=127.0.0.1
+              --port={{ mysql_port }} -u root
+              -e "source /run/ecopilot-mysql-vip-verify.sql"
+          changed_when: false
+          become: true
+
+      always:
+        - name: 删除临时 VIP 验证账户 SQL
+          ansible.builtin.file:
+            path: /run/ecopilot-mysql-vip-verify.sql
+            state: absent
+          become: true
+
     - name: 清理 root 非本地远程管理账号
       become: true
       no_log: true

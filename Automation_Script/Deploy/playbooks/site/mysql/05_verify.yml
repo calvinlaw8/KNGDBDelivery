@@ -39,6 +39,8 @@
   hosts: mysql
   gather_facts: false
   tags: mysql, mysql-verify
+  environment:
+    MYSQL_PWD: "{{ mysql_root_password }}"
 
   tasks:
     - name: 验证 Replica IO Thread Running = Yes
@@ -137,30 +139,45 @@
         msg: "{{ gtid_status.stdout_lines }}"
 
 
-- name: MySQL VIP 可达性验证（从 Ansible-01 验证）
-  hosts: mysql
+- name: MySQL VIP 网络可达性验证（从 Ansible-01 验证）
+  hosts: localhost
+  connection: local
   gather_facts: false
   tags: mysql, mysql-verify
-  vars_files:
-    - ../../group_vars/mysql.yml
 
   tasks:
     - name: Ping VIP（验证 VIP 活跃）
-      ansible.builtin.command: "ping -c 3 {{ mysql_vip }}"
+      ansible.builtin.command: "ping -c 3 {{ hostvars[groups['mysql'][0]].mysql_vip }}"
       register: vip_ping
       changed_when: false
       failed_when: vip_ping.rc != 0
 
     - name: 输出 Ping 结果
       ansible.builtin.debug:
-        msg: "VIP {{ mysql_vip }} 可达 ✅（{{ vip_ping.stdout_lines[-1] }}）"
+        msg: "VIP {{ hostvars[groups['mysql'][0]].mysql_vip }} 可达 ✅（{{ vip_ping.stdout_lines[-1] }}）"
 
+    - name: 从管理节点验证 VIP TCP 端口
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[groups['mysql'][0]].mysql_vip }}"
+        port: "{{ hostvars[groups['mysql'][0]].mysql_port }}"
+        timeout: 5
+        state: started
+
+
+- name: MySQL VIP SQL 验证（从 Primary 节点经 VIP 执行）
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-verify
+  environment:
+    MYSQL_PWD: "{{ mysql_vip_verify_password }}"
+
+  tasks:
     - name: 通过 VIP 执行 TCP SQL 并确认 Primary 角色
       when: inventory_hostname == mysql_primary_ip
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }} --protocol=TCP --host={{ mysql_vip }}
-          --port={{ mysql_port }} -u root
+          --port={{ mysql_port }} -u {{ mysql_vip_verify_user }}
           -NBe "SELECT 1, @@global.read_only;"
       register: vip_sql
       changed_when: false
@@ -173,13 +190,14 @@
   hosts: mysql
   gather_facts: false
   tags: mysql, mysql-verify
+  environment:
+    MYSQL_PWD: "{{ mysql_root_password }}"
 
   tasks:
     - name: 显示 Primary GTID 状态
       ansible.builtin.shell:
         cmd: >
-          {{ mysql_client_bin }}
-          --protocol=TCP
+          {{ mysql_client_bin }} --protocol=TCP
           --host=127.0.0.1
           --port={{ mysql_port }}
           -u root
