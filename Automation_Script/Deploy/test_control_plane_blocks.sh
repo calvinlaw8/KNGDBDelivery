@@ -133,6 +133,17 @@ assert_contains "$WORK_DIR/inventory.candidate.final" 'redis'
 assert_contains "$WORK_DIR/inventory.candidate.final" 'mongodb'
 pass '增量合并保留既有组件并生成 db_all'
 
+cp "$WORK_DIR/hosts.candidate" "$WORK_DIR/hosts.before-rerun"
+cp "$WORK_DIR/inventory.candidate.final" "$WORK_DIR/inventory.before-rerun"
+mv "$WORK_DIR/hosts.candidate" "$WORK_DIR/hosts"
+mv "$WORK_DIR/inventory.candidate.final" "$WORK_DIR/inventory"
+merge_blocks "$WORK_DIR/hosts" hosts "$WORK_DIR/hosts.candidate" redis 1
+merge_blocks "$WORK_DIR/inventory" inventory "$WORK_DIR/inventory.candidate" redis 1
+rebuild_inventory "$WORK_DIR/inventory.candidate"
+cmp -s "$WORK_DIR/hosts.before-rerun" "$WORK_DIR/hosts.candidate" || fail '重跑 Redis 改变了 hosts'
+cmp -s "$WORK_DIR/inventory.before-rerun" "$WORK_DIR/inventory.candidate.final" || fail '重跑 Redis 改变了 inventory'
+pass '重跑既有组件保持控制面幂等'
+
 if command -v "$ANSIBLE_INVENTORY" >/dev/null 2>&1; then
   "$ANSIBLE_INVENTORY" -i "$WORK_DIR/inventory.candidate.final" --graph > "$WORK_DIR/inventory.graph"
   assert_contains "$WORK_DIR/inventory.graph" '  |--@db_all:'

@@ -1,0 +1,381 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ecopilot:database-ha:config:v1",
+  "title": "eCopilot database HA deployment configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "deployment",
+    "management",
+    "ssh",
+    "components",
+    "secrets"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "components"
+      ],
+      "properties": {
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "redis",
+              "rabbitmq",
+              "mongodb",
+              "mysql"
+            ]
+          }
+        }
+      }
+    },
+    "management": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ip",
+        "hostname"
+      ],
+      "properties": {
+        "ip": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        }
+      }
+    },
+    "ssh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "management_user",
+        "database_user"
+      ],
+      "properties": {
+        "management_user": {
+          "type": "string"
+        },
+        "database_user": {
+          "type": "string"
+        }
+      }
+    },
+    "components": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "redis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodes",
+            "service"
+          ],
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "ip",
+                  "hostname",
+                  "role"
+                ],
+                "properties": {
+                  "ip": {
+                    "type": "string"
+                  },
+                  "hostname": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "master",
+                      "replica"
+                    ]
+                  }
+                }
+              }
+            },
+            "service": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "port",
+                "sentinel_port",
+                "sentinel_master_name"
+              ],
+              "properties": {
+                "port": {
+                  "type": "integer"
+                },
+                "sentinel_port": {
+                  "type": "integer"
+                },
+                "sentinel_master_name": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "rabbitmq": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodes",
+            "service"
+          ],
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "ip",
+                  "hostname",
+                  "role"
+                ],
+                "properties": {
+                  "ip": {
+                    "type": "string"
+                  },
+                  "hostname": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "seed",
+                      "member"
+                    ]
+                  }
+                }
+              }
+            },
+            "service": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "management_port",
+                "admin_user"
+              ],
+              "properties": {
+                "management_port": {
+                  "type": "integer"
+                },
+                "admin_user": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "mongodb": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodes",
+            "service"
+          ],
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "ip",
+                  "hostname",
+                  "role"
+                ],
+                "properties": {
+                  "ip": {
+                    "type": "string"
+                  },
+                  "hostname": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "primary",
+                      "secondary"
+                    ]
+                  }
+                }
+              }
+            },
+            "service": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "port",
+                "replica_set",
+                "admin_user"
+              ],
+              "properties": {
+                "port": {
+                  "type": "integer"
+                },
+                "replica_set": {
+                  "type": "string"
+                },
+                "admin_user": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "mysql": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "nodes",
+            "service"
+          ],
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "ip",
+                  "hostname",
+                  "role"
+                ],
+                "properties": {
+                  "ip": {
+                    "type": "string"
+                  },
+                  "hostname": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "primary",
+                      "replica"
+                    ]
+                  }
+                }
+              }
+            },
+            "service": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "port",
+                "replication_user",
+                "vip_verify_user",
+                "vip",
+                "vip_prefix",
+                "keepalived_interface",
+                "keepalived_router_id"
+              ],
+              "properties": {
+                "port": {
+                  "type": "integer"
+                },
+                "replication_user": {
+                  "type": "string"
+                },
+                "vip_verify_user": {
+                  "type": "string"
+                },
+                "vip": {
+                  "type": "string"
+                },
+                "vip_prefix": {
+                  "type": "integer"
+                },
+                "keepalived_interface": {
+                  "type": "string"
+                },
+                "keepalived_router_id": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "x-sensitive": true,
+      "additionalProperties": false,
+      "required": [
+        "management_ssh_password",
+        "database_ssh_password"
+      ],
+      "properties": {
+        "management_ssh_password": {
+          "type": "string",
+          "x-sensitive": true
+        },
+        "database_ssh_password": {
+          "type": "string",
+          "x-sensitive": true
+        },
+        "redis_password": {
+          "type": "string",
+          "x-sensitive": true
+        },
+        "rabbitmq_cookie": {
+          "type": "string",
+          "x-sensitive": true
+        },
+        "rabbitmq_admin_password": {
+          "type": "string",
+          "x-sensitive": true
+        },
+        "mongodb_admin_password": {
+          "type": "string",
+          "x-sensitive": true
+        },
+        "mysql_root_password": {
+          "type": "string",
+          "x-sensitive": true
+        },
+        "mysql_replication_password": {
+          "type": "string",
+          "x-sensitive": true
+        },
+        "mysql_vip_verify_password": {
+          "type": "string",
+          "x-sensitive": true
+        },
+        "keepalived_auth_password": {
+          "type": "string",
+          "x-sensitive": true
+        }
+      }
+    }
+  }
+}

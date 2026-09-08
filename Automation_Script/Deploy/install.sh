@@ -6,16 +6,55 @@ umask 077
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUNTIME_DIR="${SCRIPT_DIR}/.runtime"
-RUNTIME_PLAYBOOK_DIR="${RUNTIME_DIR}/playbooks"
-CONFIG_FILE="${RUNTIME_DIR}/config.env"
-CREDENTIALS_FILE="${RUNTIME_DIR}/credentials.txt"
-SUMMARY_FILE="${RUNTIME_DIR}/install-summary.txt"
+RUNTIME_PLAYBOOK_DIR=""
+CONFIG_FILE=""
+CREDENTIALS_FILE=""
+SUMMARY_FILE=""
+PENDING_STAGING_DIR=""
+PENDING_GENERATION_ID=""
 ALL_COMPONENTS=(redis rabbitmq mongodb mysql)
 SELECTED_COMPONENTS=("${ALL_COMPONENTS[@]}")
 
 info() { printf '\n\033[1;34m%s\033[0m\n' "$*"; }
 warn() { printf '\033[0;33m⚠ %s\033[0m\n' "$*"; }
 die() { printf '\033[0;31m✘ %s\033[0m\n' "$*" >&2; exit 1; }
+
+set_generation_paths() {
+  local generation_dir="$1"
+  RUNTIME_PLAYBOOK_DIR="${generation_dir}/secrets/playbooks"
+  CONFIG_FILE="${generation_dir}/secrets/config.env"
+  CREDENTIALS_FILE="${generation_dir}/secrets/credentials.txt"
+  SUMMARY_FILE="${generation_dir}/config/install-summary.txt"
+}
+
+refresh_current_generation() {
+  local current_dir python_bin
+  python_bin="$(command -v python3 || true)"
+  [[ -n "${python_bin}" ]] || return 1
+  if current_dir=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python_bin}" -m configurator current-generation --runtime-dir "${RUNTIME_DIR}"); then
+    set_generation_paths "${current_dir}"
+    return 0
+  fi
+  return 1
+}
+
+show_legacy_config_gate() {
+  local backup legacy_config="${RUNTIME_DIR}/config.env" preview python_bin
+  [[ -f "${legacy_config}" ]] || return 0
+  python_bin="$(command -v python3 || true)"
+  [[ -n "${python_bin}" ]] || die "检测到旧版运行时配置，但缺少 python3，无法安全识别；不会执行该文件"
+  warn "检测到旧版运行时配置；出于安全原因不会执行或自动猜测迁移。"
+  if ! preview=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python_bin}" -m configurator inspect-legacy "${legacy_config}"); then
+    die "旧版运行时配置包含未知、损坏或不安全语法；请保留原文件并重新录入配置"
+  fi
+  printf '旧配置脱敏识别结果：%s\n' "${preview}"
+  backup=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python_bin}" -m configurator archive-legacy "${legacy_config}" --runtime-dir "${RUNTIME_DIR}") || \
+    die "旧版运行时配置只读归档失败；原文件未覆盖，停止继续"
+  warn "旧格式缺少完整版本化数据，必须重新录入才能生成新 generation；原文件未覆盖，只读备份：${backup}"
+}
 
 ask() {
   local prompt="$1" default="${2:-}" answer
@@ -52,6 +91,54 @@ ask_component_secret() {
     fi
     warn "该服务凭据只能使用 ASCII 字母、数字及 . _ : @ + = , -，请重新输入"
   done
+}
+
+export_credentials_file() {
+  local temporary_file original_noclobber
+  [[ -n "${PENDING_STAGING_DIR}" ]] || die "运行时暂存目录尚未创建，不能导出凭据"
+  [[ ! -e "${PENDING_STAGING_DIR}/credentials.txt" ]] || die "凭据清单已存在，停止覆盖"
+  temporary_file="${PENDING_STAGING_DIR}/.credentials.txt.$$"
+  original_noclobber=$(set +o | grep noclobber)
+  set -C
+  if ! : > "${temporary_file}"; then
+    eval "${original_noclobber}"
+    die "凭据导出临时文件已存在，停止写入"
+  fi
+  eval "${original_noclobber}"
+  chmod 600 "${temporary_file}"
+  {
+    printf 'eCopilot 数据库高可用部署凭据\n'
+    printf '管理节点 SSH 密码：%s\n' "${ANSIBLE_NODE_PASS}"
+    printf '数据库节点 SSH 密码：%s\n' "${DB_PASS}"
+    component_is_selected redis && printf 'Redis 密码：%s\n' "${redis_password}"
+    if component_is_selected rabbitmq; then
+      printf 'RabbitMQ 节点间 Cookie：%s\nRabbitMQ 管理员密码：%s\n' "${rabbitmq_cookie}" "${rabbitmq_admin_password}"
+    fi
+    component_is_selected mongodb && printf 'MongoDB 管理员密码：%s\n' "${mongodb_admin_password}"
+    if component_is_selected mysql; then
+      printf 'MySQL Root 密码：%s\nMySQL 复制密码：%s\nMySQL VIP 验证密码：%s\nKeepalived 认证密码：%s\n' \
+        "${mysql_root_password}" "${mysql_repl_password}" "${mysql_vip_verify_password}" "${keepalived_auth_pass}"
+    fi
+  } > "${temporary_file}"
+  mv "${temporary_file}" "${PENDING_STAGING_DIR}/credentials.txt"
+  warn "已按明确确认导出明文凭据清单；部署完成后请立即转移或安全清理该文件。"
+}
+
+maybe_export_credentials_file() {
+  local choice confirmation
+  if [[ "${INSTALL_EXPORT_CREDENTIALS:-}" == "1" ]]; then
+    [[ "${INSTALL_EXPORT_CREDENTIALS_CONFIRM:-}" == "EXPORT" ]] || \
+      die "显式导出凭据需要 INSTALL_EXPORT_CREDENTIALS_CONFIRM=EXPORT"
+    export_credentials_file
+    return
+  fi
+  ask "是否导出额外的明文凭据清单（0600，仅本机使用，默认否）" "否"
+  choice="${ANSWER}"
+  [[ "${choice}" == "是" ]] || return
+  ask "输入 EXPORT 确认导出明文凭据清单"
+  confirmation="${ANSWER}"
+  [[ "${confirmation}" == "EXPORT" ]] || die "未确认导出明文凭据清单"
+  export_credentials_file
 }
 
 is_valid_subnet_prefix() {
@@ -341,55 +428,6 @@ is_valid_hostname() {
   [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]$|^[A-Za-z0-9]$ ]]
 }
 
-validate_configuration() {
-  local error_count=0 i j ip hostname
-  local all_ips all_hostnames
-  all_ips=("${ANSIBLE_NODE_IP}")
-  all_hostnames=("${ANSIBLE_NODE_HOSTNAME}")
-  component_is_selected redis && { all_ips+=("${REDIS_IPS[@]}"); all_hostnames+=("${REDIS_HOSTNAMES[@]}"); }
-  component_is_selected rabbitmq && { all_ips+=("${RABBITMQ_IPS[@]}"); all_hostnames+=("${RABBITMQ_HOSTNAMES[@]}"); }
-  component_is_selected mongodb && { all_ips+=("${MONGODB_IPS[@]}"); all_hostnames+=("${MONGODB_HOSTNAMES[@]}"); }
-  component_is_selected mysql && { all_ips+=("${MYSQL_IPS[@]}"); all_hostnames+=("${MYSQL_HOSTNAMES[@]}"); }
-  for ip in "${all_ips[@]}"; do
-    if ! is_valid_ip "${ip}"; then
-      warn "IP 地址格式无效：${ip}"; error_count=$((error_count + 1))
-    fi
-  done
-  for hostname in "${all_hostnames[@]}"; do
-    if ! is_valid_hostname "${hostname}"; then
-      warn "主机名格式无效：${hostname}"; error_count=$((error_count + 1))
-    fi
-  done
-  if ! is_valid_ip "${ANSIBLE_NODE_IP}"; then
-    warn "Ansible 管理节点 IP 地址格式无效：${ANSIBLE_NODE_IP}"; error_count=$((error_count + 1))
-  fi
-  if component_is_selected mysql && ! is_valid_ip "${mysql_vip}"; then
-    warn "MySQL VIP 地址格式无效：${mysql_vip}"; error_count=$((error_count + 1))
-  fi
-  for ((i = 0; i < ${#all_ips[@]}; i++)); do
-    for ((j = i + 1; j < ${#all_ips[@]}; j++)); do
-      if [[ "${all_ips[$i]}" == "${all_ips[$j]}" ]]; then
-        warn "节点 IP 重复：${all_ips[$i]}"; error_count=$((error_count + 1))
-      fi
-    done
-  done
-  for ((i = 0; i < ${#all_hostnames[@]}; i++)); do
-    for ((j = i + 1; j < ${#all_hostnames[@]}; j++)); do
-      if [[ "${all_hostnames[$i]}" == "${all_hostnames[$j]}" ]]; then
-        warn "节点主机名重复：${all_hostnames[$i]}"; error_count=$((error_count + 1))
-      fi
-    done
-  done
-  if component_is_selected mysql; then
-    for ip in "${all_ips[@]}"; do
-      if [[ "${mysql_vip}" == "${ip}" ]]; then
-        warn "MySQL VIP 不能与数据库节点 IP 相同：${mysql_vip}"; error_count=$((error_count + 1))
-      fi
-    done
-  fi
-  ((error_count == 0))
-}
-
 cancel_deployment() {
   local answer
   ask "确定取消本次部署？当前输入不会保存" "n"
@@ -472,12 +510,16 @@ collect_all_inputs() {
 }
 
 confirm_overview() {
-  local answer validation_round=0
+  local answer validation_round=0 python_bin
+  python_bin="$(command -v python3 || true)"
+  [[ -n "${python_bin}" ]] || die "未找到 python3；统一配置校验器要求 Python 3.9 或更高版本"
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python_bin}" -m configurator doctor || die "Python 环境不满足统一配置校验器要求"
   while true; do
     show_overview
     validation_round=$((validation_round + 1))
     info "正在进行第 ${validation_round} 次配置校验"
-    if ! validate_configuration; then
+    if ! validate_wizard_configuration; then
       warn "配置校验未通过，请先修改错误配置；修正后将重新校验"
       reset_configuration
       continue
@@ -494,53 +536,89 @@ confirm_overview() {
   done
 }
 
-yaml_scalar() {
-  local file="$1" key="$2" value="$3"
-  awk -v key="${key}" -v value="${value}" '
-    $0 ~ "^[[:space:]]*" key ":" {
-      prefix=$0; sub(key ":.*$", "", prefix)
-      gsub(/\\/, "\\\\", value); gsub(/"/, "\\\"", value)
-      print prefix key ": \"" value "\""; next
-    }
-    { print }
-  ' "${file}" > "${file}.tmp"
-  mv "${file}.tmp" "${file}"
-}
-
-yaml_block() {
-  local file="$1" start_key="$2" block="$3"
-  local replacement="${block//$'\n'/|}"
-  awk -v key="${start_key}" -v replacement="${replacement}" '
-    BEGIN { line_count=split(replacement, lines, "|"); replacing=0 }
-    $0 ~ "^[[:space:]]*" key ":" { for (i=1; i<=line_count; i++) print lines[i]; replacing=1; next }
-    replacing && ($0 ~ /^[^[:space:]]/ || $0 == "") { replacing=0 }
-    !replacing { print }
-  ' "${file}" > "${file}.tmp"
-  mv "${file}.tmp" "${file}"
-}
-
-shell_quote() { printf '%q' "$1"; }
-
-write_runtime_config() {
-  local i selected_components_csv
+validate_wizard_configuration() {
+  local i python_bin selected_components_csv
+  python_bin="$(command -v python3 || true)"
+  [[ -n "${python_bin}" ]] || return 1
   selected_components_csv=$(IFS=,; printf '%s' "${SELECTED_COMPONENTS[*]}")
   {
-    printf '# 本机生成的运行时配置，禁止提交 Git。\n'
-    printf 'PROJECT_ROOT=%q\n' "${PROJECT_ROOT}"
-    printf 'DEPLOY_COMPONENTS=%q\n' "${selected_components_csv}"
-    printf 'PKG_ROOT=%q\nLOCAL_DB_PKG_DIR=%q\n' "${PROJECT_ROOT}/Automation_Script/Deploy/pkg" "${PROJECT_ROOT}/离线安装包"
-    printf 'ANSIBLE_NODE_IP=%q\nANSIBLE_NODE_USER=%q\nANSIBLE_NODE_PASS=%q\nANSIBLE_NODE_HOSTNAME=%q\n' "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_USER}" "${ANSIBLE_NODE_PASS}" "${ANSIBLE_NODE_HOSTNAME}"
-    printf 'LOCAL_PLAYBOOK_DIR=%q\nREMOTE_PLAYBOOK_DIR=%q\nLOCAL_PAYLOAD_VALIDATOR=%q\nREMOTE_PAYLOAD_VALIDATOR=%q\nREMOTE_PKG_DIR=%q\n' \
-      "${RUNTIME_PLAYBOOK_DIR}" "/home/${ANSIBLE_NODE_USER}/playbooks" "${PROJECT_ROOT}/Automation_Script/Deploy/validate_deb_payloads.sh" "/home/${ANSIBLE_NODE_USER}/validate_deb_payloads.sh" "/home/${ANSIBLE_NODE_USER}/pkg"
-    printf 'REDIS_IPS=()\nREDIS_HOSTNAMES=()\nRABBITMQ_IPS=()\nRABBITMQ_HOSTNAMES=()\nMONGODB_IPS=()\nMONGODB_HOSTNAMES=()\nMYSQL_IPS=()\nMYSQL_HOSTNAMES=()\n'
-    if component_is_selected redis; then for i in 0 1 2; do printf 'REDIS_IPS[%d]=%q\nREDIS_HOSTNAMES[%d]=%q\n' "$i" "${REDIS_IPS[$i]}" "$i" "${REDIS_HOSTNAMES[$i]}"; done; fi
-    if component_is_selected rabbitmq; then for i in 0 1 2; do printf 'RABBITMQ_IPS[%d]=%q\nRABBITMQ_HOSTNAMES[%d]=%q\n' "$i" "${RABBITMQ_IPS[$i]}" "$i" "${RABBITMQ_HOSTNAMES[$i]}"; done; fi
-    if component_is_selected mongodb; then for i in 0 1 2; do printf 'MONGODB_IPS[%d]=%q\nMONGODB_HOSTNAMES[%d]=%q\n' "$i" "${MONGODB_IPS[$i]}" "$i" "${MONGODB_HOSTNAMES[$i]}"; done; fi
-    if component_is_selected mysql; then for i in 0 1 2; do printf 'MYSQL_IPS[%d]=%q\nMYSQL_HOSTNAMES[%d]=%q\n' "$i" "${MYSQL_IPS[$i]}" "$i" "${MYSQL_HOSTNAMES[$i]}"; done; fi
-    printf 'DB_IPS=("${REDIS_IPS[@]}" "${RABBITMQ_IPS[@]}" "${MONGODB_IPS[@]}" "${MYSQL_IPS[@]}")\nDB_HOSTNAMES=("${REDIS_HOSTNAMES[@]}" "${RABBITMQ_HOSTNAMES[@]}" "${MONGODB_HOSTNAMES[@]}" "${MYSQL_HOSTNAMES[@]}")\n'
-    printf 'DB_USER=%q\nDB_PASS=%q\n' "${DB_USER}" "${DB_PASS}"
-  } > "${CONFIG_FILE}"
-  chmod 600 "${CONFIG_FILE}"
+    printf '%s\0' "${selected_components_csv}" "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_HOSTNAME}" "${ANSIBLE_NODE_USER}" "${ANSIBLE_NODE_PASS}" "${DB_USER}" "${DB_PASS}"
+    if component_is_selected redis; then
+      for i in 0 1 2; do printf '%s\0' "${REDIS_IPS[$i]}"; done
+      for i in 0 1 2; do printf '%s\0' "${REDIS_HOSTNAMES[$i]}"; done
+      printf '%s\0' "${redis_password}"
+    fi
+    if component_is_selected rabbitmq; then
+      for i in 0 1 2; do printf '%s\0' "${RABBITMQ_IPS[$i]}"; done
+      for i in 0 1 2; do printf '%s\0' "${RABBITMQ_HOSTNAMES[$i]}"; done
+      printf '%s\0' "${rabbitmq_cookie}" "${rabbitmq_admin_password}"
+    fi
+    if component_is_selected mongodb; then
+      for i in 0 1 2; do printf '%s\0' "${MONGODB_IPS[$i]}"; done
+      for i in 0 1 2; do printf '%s\0' "${MONGODB_HOSTNAMES[$i]}"; done
+      printf '%s\0' "${mongodb_admin_password}"
+    fi
+    if component_is_selected mysql; then
+      for i in 0 1 2; do printf '%s\0' "${MYSQL_IPS[$i]}"; done
+      for i in 0 1 2; do printf '%s\0' "${MYSQL_HOSTNAMES[$i]}"; done
+      printf '%s\0' "${mysql_vip}" "${mysql_vip_prefix}" "${mysql_root_password}" "${mysql_repl_password}" "${mysql_vip_verify_password}" "${keepalived_auth_pass}"
+    fi
+  } | PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" "${python_bin}" -m configurator validate-wizard --format text
+}
+
+render_wizard_configuration() {
+  local final_generation_dir i python_bin selected_components_csv
+  python_bin="$(command -v python3 || true)"
+  [[ -n "${python_bin}" ]] || die "未找到 python3；统一配置渲染器要求 Python 3.9 或更高版本"
+  selected_components_csv=$(IFS=,; printf '%s' "${SELECTED_COMPONENTS[*]}")
+  PENDING_GENERATION_ID=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python_bin}" -m configurator new-generation-id)
+  PENDING_STAGING_DIR="${RUNTIME_DIR}/.staging-${PENDING_GENERATION_ID}"
+  final_generation_dir="${RUNTIME_DIR}/generations/${PENDING_GENERATION_ID}"
+  rm -rf "${PENDING_STAGING_DIR}"
+  if ! {
+    printf '%s\0' "${selected_components_csv}" "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_HOSTNAME}" "${ANSIBLE_NODE_USER}" "${ANSIBLE_NODE_PASS}" "${DB_USER}" "${DB_PASS}"
+    if component_is_selected redis; then
+      for i in 0 1 2; do printf '%s\0' "${REDIS_IPS[$i]}"; done
+      for i in 0 1 2; do printf '%s\0' "${REDIS_HOSTNAMES[$i]}"; done
+      printf '%s\0' "${redis_password}"
+    fi
+    if component_is_selected rabbitmq; then
+      for i in 0 1 2; do printf '%s\0' "${RABBITMQ_IPS[$i]}"; done
+      for i in 0 1 2; do printf '%s\0' "${RABBITMQ_HOSTNAMES[$i]}"; done
+      printf '%s\0' "${rabbitmq_cookie}" "${rabbitmq_admin_password}"
+    fi
+    if component_is_selected mongodb; then
+      for i in 0 1 2; do printf '%s\0' "${MONGODB_IPS[$i]}"; done
+      for i in 0 1 2; do printf '%s\0' "${MONGODB_HOSTNAMES[$i]}"; done
+      printf '%s\0' "${mongodb_admin_password}"
+    fi
+    if component_is_selected mysql; then
+      for i in 0 1 2; do printf '%s\0' "${MYSQL_IPS[$i]}"; done
+      for i in 0 1 2; do printf '%s\0' "${MYSQL_HOSTNAMES[$i]}"; done
+      printf '%s\0' "${mysql_vip}" "${mysql_vip_prefix}" "${mysql_root_password}" "${mysql_repl_password}" "${mysql_vip_verify_password}" "${keepalived_auth_pass}"
+    fi
+  } | PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" "${python_bin}" -m configurator render-wizard \
+    --output "${PENDING_STAGING_DIR}" --project-root "${PROJECT_ROOT}" --runtime-playbook-dir "${final_generation_dir}/secrets/playbooks"; then
+    rm -rf "${PENDING_STAGING_DIR}"
+    die "统一配置校验或渲染失败；未替换现有运行时配置"
+  fi
+  cp -R "${SCRIPT_DIR}/playbooks/preflights" "${PENDING_STAGING_DIR}/playbooks/"
+  cp -R "${SCRIPT_DIR}/playbooks/site" "${PENDING_STAGING_DIR}/playbooks/"
+  find "${PENDING_STAGING_DIR}" -type d -exec chmod 700 {} \;
+  find "${PENDING_STAGING_DIR}" -type f -exec chmod 600 {} \;
+}
+
+publish_wizard_generation() {
+  local destination python_bin
+  python_bin="$(command -v python3 || true)"
+  if ! destination=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python_bin}" -m configurator publish-generation --runtime-dir "${RUNTIME_DIR}" \
+    --staging "${PENDING_STAGING_DIR}" --generation-id "${PENDING_GENERATION_ID}"); then
+    rm -rf "${PENDING_STAGING_DIR}"
+    die "运行时配置发布失败；既有 current 未改变"
+  fi
+  set_generation_paths "${destination}"
 }
 
 show_deployment_guide() {
@@ -585,6 +663,7 @@ show_deployment_status() {
 
 resume_existing_deployment() {
   local choice deploy_args saved_components
+  refresh_current_generation || die "未找到可继续的 current 运行时配置，请先完成一次配置录入。"
   [[ -f "${CONFIG_FILE}" && -d "${RUNTIME_PLAYBOOK_DIR}" ]] || \
     die "未找到可继续的运行时配置，请先完成一次配置录入。"
 
@@ -599,6 +678,7 @@ resume_existing_deployment() {
       *) return ;;
     esac
     DELIVERY_CONFIG_FILE="${CONFIG_FILE}" DELIVERY_PLAYBOOK_DIR="${RUNTIME_PLAYBOOK_DIR}" \
+      DELIVERY_LOG_DIR="${RUNTIME_DIR}/logs" DELIVERY_STATE_DIR="${RUNTIME_DIR}/state" \
       bash "${SCRIPT_DIR}/init_ansible.sh" deploy "${deploy_args[@]}"
     info "继续部署结束"
     return
@@ -621,12 +701,14 @@ resume_existing_deployment() {
   esac
 
   DELIVERY_CONFIG_FILE="${CONFIG_FILE}" DELIVERY_PLAYBOOK_DIR="${RUNTIME_PLAYBOOK_DIR}" \
+    DELIVERY_LOG_DIR="${RUNTIME_DIR}/logs" DELIVERY_STATE_DIR="${RUNTIME_DIR}/state" \
     bash "${SCRIPT_DIR}/init_ansible.sh" deploy "${deploy_args[@]}"
   info "继续部署结束"
 }
 
 redeploy_existing_configuration() {
   local saved_components deploy_args
+  refresh_current_generation || die "未找到可重新部署的 current 运行时配置，请先完成一次配置录入。"
   [[ -f "${CONFIG_FILE}" && -d "${RUNTIME_PLAYBOOK_DIR}" ]] || \
     die "未找到可重新部署的运行时配置，请先完成一次配置录入。"
 
@@ -644,6 +726,7 @@ redeploy_existing_configuration() {
     *) return ;;
   esac
   DELIVERY_CONFIG_FILE="${CONFIG_FILE}" DELIVERY_PLAYBOOK_DIR="${RUNTIME_PLAYBOOK_DIR}" \
+    DELIVERY_LOG_DIR="${RUNTIME_DIR}/logs" DELIVERY_STATE_DIR="${RUNTIME_DIR}/state" \
     bash "${SCRIPT_DIR}/init_ansible.sh" deploy "${deploy_args[@]}"
   info "重新部署结束"
 }
@@ -655,6 +738,7 @@ main() {
   warn "安全提示：本向导首次连接目标主机时不人工验证 SSH 主机指纹。"
   warn "本方式仅适用于受控部署网络。"
   warn "不建议在不可信网络中执行。"
+  refresh_current_generation || show_legacy_config_gate
   printf '\n'
   printf '本向导将配置 Redis、RabbitMQ、MongoDB、MySQL 四套三节点服务，并通过离线 Ansible 完成部署。\n'
   printf '部署版本：Redis 8.2.8；RabbitMQ 4.2.9 + Erlang 27.3.4.16-1；MongoDB 8.2.12；MySQL 8.4.11。\n'
@@ -709,42 +793,8 @@ main() {
   collect_all_inputs
   confirm_overview
 
-  rm -rf "${RUNTIME_DIR}"
-  mkdir -p "${RUNTIME_PLAYBOOK_DIR}/group_vars"
-  chmod 700 "${RUNTIME_DIR}"
-  cp -R "${SCRIPT_DIR}/playbooks/preflights" "${RUNTIME_PLAYBOOK_DIR}/"
-  cp -R "${SCRIPT_DIR}/playbooks/site" "${RUNTIME_PLAYBOOK_DIR}/"
-  cp "${SCRIPT_DIR}/playbooks/group_vars/"*.yml "${RUNTIME_PLAYBOOK_DIR}/group_vars/"
-
-  write_runtime_config
-  if component_is_selected mongodb; then
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/all.yml" mongodb_primary_ip "${MONGODB_IPS[0]}"
-    yaml_block "${RUNTIME_PLAYBOOK_DIR}/group_vars/all.yml" mongodb_replica_ips "$(printf 'mongodb_replica_ips:\n  - \"%s\"\n  - \"%s\"' "${MONGODB_IPS[1]}" "${MONGODB_IPS[2]}")"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mongodb.yml" mongodb_admin_password "${mongodb_admin_password}"
-  fi
-  if component_is_selected mysql; then
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/all.yml" mysql_primary_ip "${MYSQL_IPS[0]}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_root_password "${mysql_root_password}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_repl_password "${mysql_repl_password}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_vip_verify_host "${MYSQL_IPS[0]}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_vip_verify_password "${mysql_vip_verify_password}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_vip "${mysql_vip}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_vip_prefix "${mysql_vip_prefix}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" keepalived_auth_pass "${keepalived_auth_pass}"
-    yaml_block "${RUNTIME_PLAYBOOK_DIR}/group_vars/mysql.yml" mysql_nodes "$(printf 'mysql_nodes:\n  - ip: \"%s\"\n    hostname: \"%s\"\n    server_id: 1\n    role: \"primary\"\n    keepalived_priority: 100\n  - ip: \"%s\"\n    hostname: \"%s\"\n    server_id: 2\n    role: \"replica\"\n    keepalived_priority: 90\n  - ip: \"%s\"\n    hostname: \"%s\"\n    server_id: 3\n    role: \"replica\"\n    keepalived_priority: 80' "${MYSQL_IPS[0]}" "${MYSQL_HOSTNAMES[0]}" "${MYSQL_IPS[1]}" "${MYSQL_HOSTNAMES[1]}" "${MYSQL_IPS[2]}" "${MYSQL_HOSTNAMES[2]}")"
-  fi
-  if component_is_selected redis; then
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/redis.yml" redis_password "${redis_password}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/redis.yml" redis_master_ip "${REDIS_IPS[0]}"
-    yaml_block "${RUNTIME_PLAYBOOK_DIR}/group_vars/redis.yml" redis_replicas "$(printf 'redis_replicas:\n  - \"%s\"\n  - \"%s\"' "${REDIS_IPS[1]}" "${REDIS_IPS[2]}")"
-  fi
-  if component_is_selected rabbitmq; then
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/rabbitmq.yml" rabbitmq_seed_node_ip "${RABBITMQ_IPS[0]}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/rabbitmq.yml" rabbitmq_seed_hostname "${RABBITMQ_HOSTNAMES[0]}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/rabbitmq.yml" rabbitmq_node_prefix "${RABBITMQ_HOSTNAMES[0]%[-_][0-9]*}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/rabbitmq.yml" erlang_cookie "${rabbitmq_cookie}"
-    yaml_scalar "${RUNTIME_PLAYBOOK_DIR}/group_vars/rabbitmq.yml" rabbitmq_admin_password "${rabbitmq_admin_password}"
-  fi
+  render_wizard_configuration
+  maybe_export_credentials_file
 
   {
     printf 'eCopilot 数据库高可用部署摘要\n生成时间：%s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -754,40 +804,11 @@ main() {
     component_is_selected rabbitmq && printf 'RabbitMQ：%s\n' "${RABBITMQ_IPS[*]}"
     component_is_selected mongodb && printf 'MongoDB：%s\nMongoDB keyFile：部署后各节点 %s\n' "${MONGODB_IPS[*]}" "/etc/mongodb-keyfile"
     component_is_selected mysql && printf 'MySQL：%s\nMySQL VIP：%s/%s\n' "${MYSQL_IPS[*]}" "${mysql_vip}" "${mysql_vip_prefix}"
-    printf '\n敏感凭据位置：%s（权限 600）\n运行时配置位置：%s（目录权限 700）\n' "${CREDENTIALS_FILE}" "${CONFIG_FILE}"
-  } > "${SUMMARY_FILE}"
-  chmod 600 "${SUMMARY_FILE}"
-  credentials_tmp="${CREDENTIALS_FILE}.tmp.$$"
-  {
-    printf 'eCopilot 数据库高可用部署凭据清单\n生成时间：%s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-    printf '[Ansible 管理节点]\nIP=%s\n主机名=%s\n账号=%s\n密码=%s\n\n' \
-      "${ANSIBLE_NODE_IP}" "${ANSIBLE_NODE_HOSTNAME}" "${ANSIBLE_NODE_USER}" "${ANSIBLE_NODE_PASS}"
-    printf '[数据库服务器 SSH]\n账号=%s\n密码=%s\n\n' "${DB_USER}" "${DB_PASS}"
-    if component_is_selected redis; then
-      printf '[Redis 节点]\n'
-      for i in 0 1 2; do printf '节点%d IP=%s 主机名=%s\n' "$((i + 1))" "${REDIS_IPS[$i]}" "${REDIS_HOSTNAMES[$i]}"; done
-      printf '服务密码=%s\n\n' "${redis_password}"
-    fi
-    if component_is_selected rabbitmq; then
-      printf '[RabbitMQ 节点]\n'
-      for i in 0 1 2; do printf '节点%d IP=%s 主机名=%s\n' "$((i + 1))" "${RABBITMQ_IPS[$i]}" "${RABBITMQ_HOSTNAMES[$i]}"; done
-      printf '节点间通信 Cookie=%s\n管理员服务密码=%s\n\n' "${rabbitmq_cookie}" "${rabbitmq_admin_password}"
-    fi
-    if component_is_selected mongodb; then
-      printf '[MongoDB 节点]\n'
-      for i in 0 1 2; do printf '节点%d IP=%s 主机名=%s\n' "$((i + 1))" "${MONGODB_IPS[$i]}" "${MONGODB_HOSTNAMES[$i]}"; done
-      printf 'admin 服务密码=%s\n\n' "${mongodb_admin_password}"
-    fi
-    if component_is_selected mysql; then
-      printf '[MySQL 节点]\n'
-      for i in 0 1 2; do printf '节点%d IP=%s 主机名=%s\n' "$((i + 1))" "${MYSQL_IPS[$i]}" "${MYSQL_HOSTNAMES[$i]}"; done
-      printf 'root 数据库密码=%s\nreplication 复制账号密码=%s\nVIP 验证账号密码=%s\nKeepalived VIP=%s\nKeepalived 节点通信认证密码=%s\n' \
-        "${mysql_root_password}" "${mysql_repl_password}" "${mysql_vip_verify_password}" "${mysql_vip}" "${keepalived_auth_pass}"
-    fi
-  } > "${credentials_tmp}"
-  chmod 600 "${credentials_tmp}"
-  mv "${credentials_tmp}" "${CREDENTIALS_FILE}"
-  chmod 600 "${CREDENTIALS_FILE}"
+    printf '\n运行时机密配置位置：%s（文件权限 600，目录权限 700）\n' \
+      "${RUNTIME_DIR}/generations/${PENDING_GENERATION_ID}/secrets/config.env"
+  } > "${PENDING_STAGING_DIR}/install-summary.txt"
+  chmod 600 "${PENDING_STAGING_DIR}/install-summary.txt"
+  publish_wizard_generation
 
   if [[ "${INSTALL_DRY_RUN:-0}" == "1" ]]; then
     info "配置生成完成（dry-run，未连接远端）"
@@ -797,11 +818,14 @@ main() {
 
   info "配置生成完成，开始初始化和部署"
   DELIVERY_CONFIG_FILE="${CONFIG_FILE}" DELIVERY_PLAYBOOK_DIR="${RUNTIME_PLAYBOOK_DIR}" \
+    DELIVERY_LOG_DIR="${RUNTIME_DIR}/logs" DELIVERY_STATE_DIR="${RUNTIME_DIR}/state" \
     bash "${SCRIPT_DIR}/init_ansible.sh" deploy --components "$(IFS=,; printf '%s' "${SELECTED_COMPONENTS[*]}")"
   info "安装完成"
     printf '\n安装摘要已写入：%s\n' "${SUMMARY_FILE}"
-    printf '敏感凭据已写入权限 600 的文件：%s\n' "${CREDENTIALS_FILE}"
-    printf '请勿把上述文件内容复制到终端、日志或 Git。\n'
+    printf '运行时机密配置受目录权限 700 和文件权限 600 保护。\n'
+    printf '请勿将凭据复制到终端、日志或 Git。\n'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

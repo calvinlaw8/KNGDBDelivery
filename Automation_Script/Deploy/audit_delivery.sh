@@ -92,6 +92,16 @@ check_runtime_config_isolation() {
     warn "未在部署脚本中找到运行时配置加载路径，请人工确认配置入口"
 }
 
+check_runtime_git_isolation() {
+  local tracked staged unignored
+  tracked=$(git -C "${DELIVERY_ROOT}" ls-files -- ':(glob)**/.runtime/**' ':(glob)**/config.env')
+  [[ -z "${tracked}" ]] || fail "Git 索引包含运行时或现场配置文件"
+  staged=$(git -C "${DELIVERY_ROOT}" diff --cached --name-only -- ':(glob)**/.runtime/**' ':(glob)**/config.env')
+  [[ -z "${staged}" ]] || fail "Git 暂存区包含运行时或现场配置文件"
+  unignored=$(git -C "${DELIVERY_ROOT}" ls-files --others --exclude-standard -- ':(glob)**/.runtime/**' ':(glob)**/config.env')
+  [[ -z "${unignored}" ]] || fail "未忽略的工作树包含运行时或现场配置文件"
+}
+
 check_expected_layout
 check_shell_syntax
 check_yaml_syntax
@@ -99,6 +109,7 @@ check_secret_placeholders
 check_forbidden_destructive_patterns
 check_sudo_stdin_split
 check_runtime_config_isolation
+check_runtime_git_isolation
 
 if ((failures > 0)); then
   printf 'RESULT: FAILED（%d 个问题，%d 个警告）\n' "${failures}" "${warnings}" >&2
