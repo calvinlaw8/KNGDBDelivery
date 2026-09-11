@@ -4,7 +4,7 @@ references:
   - "File: /Automation_Script/Deploy/install.sh"
   - "File: /Automation_Script/Deploy/run_test.sh"
   - "File: /Automation_Script/Deploy/verify_delivery.sh"
-generationTime: 2026-09-02T10:04:34.227Z
+generationTime: 2026-09-08T03:15:57.874Z
 ---
 flowchart TD
     subgraph INSTALL["install.sh - Interactive Deployment Wizard"]
@@ -71,6 +71,15 @@ flowchart TD
         V5 --> V6{"Failures detected"}
         V6 -->|Yes| VE(["RESULT: FAILED"])
         V6 -->|No| VS(["RESULT: PASS"])
+        V5 --> V7["Check workbench JavaScript syntax"]
+        V7 --> V8{"Node.js available"}
+        V8 -->|Yes| V9["Run node --check on workbench script"]
+        V8 -->|No| V10["Skip JavaScript syntax check"]
+        V9 --> V5
+        V10 --> V5
+        V5 --> V11["Check customer document consistency"]
+        V11 --> V12["Check configurator"]
+        V12 --> V6
     end
 
     I9 --> N0

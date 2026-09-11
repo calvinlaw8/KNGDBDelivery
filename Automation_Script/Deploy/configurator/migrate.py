@@ -48,6 +48,9 @@ AGGREGATE_LINES = {
     'DB_IPS=("${REDIS_IPS[@]}" "${RABBITMQ_IPS[@]}" "${MONGODB_IPS[@]}" "${MYSQL_IPS[@]}")',
     'DB_HOSTNAMES=("${REDIS_HOSTNAMES[@]}" "${RABBITMQ_HOSTNAMES[@]}" "${MONGODB_HOSTNAMES[@]}" "${MYSQL_HOSTNAMES[@]}")',
 }
+COMPONENT_PREFIXES = ("REDIS", "RABBITMQ", "MONGODB", "MYSQL")
+AGGREGATE_PATTERN = re.compile(r'^DB_(IPS|HOSTNAMES)=\((.*?)\)$')
+AGGREGATE_TOKEN_PATTERN = re.compile(r'^"\$\{(REDIS|RABBITMQ|MONGODB|MYSQL)_(IPS|HOSTNAMES)\[@\]\}"$')
 QUOTED_VALUE = r"'(?:[^']|'\"'\"')*'"
 SCALAR_PATTERN = re.compile(r"^([A-Z][A-Z0-9_]*)=(" + QUOTED_VALUE + r")$")
 EMPTY_ARRAY_PATTERN = re.compile(r"^([A-Z][A-Z0-9_]*)=\(\)$")
@@ -59,17 +62,29 @@ def _decode_quoted(value: str) -> str:
 
 
 def parse_legacy_env_bytes(source: bytes) -> Dict[str, Any]:
-    try:
-        text = source.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise MigrationError("legacy config is not valid UTF-8") from error
+    # Legacy shell values can contain arbitrary password bytes. Surrogate escapes
+    # preserve them for recognition and archiving without ever executing the file.
+    text = source.decode("utf-8", "surrogateescape")
     scalars: Dict[str, str] = {}
     arrays: Dict[str, Dict[int, str]] = {}
     aggregates = set()
     for line_number, line in enumerate(text.splitlines(), 1):
         if not line or line.startswith("#"):
             continue
-        if line in AGGREGATE_LINES:
+        aggregate = AGGREGATE_PATTERN.fullmatch(line)
+        if aggregate:
+            kind, references = aggregate.groups()
+            expected_suffix = "_" + kind
+            tokens = references.split()
+            prefixes = []
+            for token in tokens:
+                match = AGGREGATE_TOKEN_PATTERN.fullmatch(token)
+                if not match or match.group(2) != kind:
+                    raise MigrationError("unsupported aggregate syntax at line {0}".format(line_number))
+                prefixes.append(match.group(1))
+            prefix_indexes = [COMPONENT_PREFIXES.index(prefix) for prefix in prefixes]
+            if not prefixes or len(prefixes) != len(set(prefixes)) or prefix_indexes != sorted(prefix_indexes):
+                raise MigrationError("unsupported aggregate syntax at line {0}".format(line_number))
             if line in aggregates:
                 raise MigrationError("duplicate aggregate assignment at line {0}".format(line_number))
             aggregates.add(line)
@@ -101,7 +116,7 @@ def parse_legacy_env_bytes(source: bytes) -> Dict[str, Any]:
         raise MigrationError("unsupported legacy syntax at line {0}".format(line_number))
     missing_scalars = sorted(SCALAR_NAMES - set(scalars))
     missing_arrays = sorted(ARRAY_NAMES - set(arrays))
-    if missing_scalars or missing_arrays or aggregates != AGGREGATE_LINES:
+    if missing_scalars or missing_arrays or len(aggregates) != 2:
         raise MigrationError("legacy config is incomplete")
     normalized_arrays = {}
     for name, values in arrays.items():
@@ -118,6 +133,13 @@ def inspect_legacy_env(path: Path) -> Dict[str, Any]:
     parsed = parse_legacy_env_bytes(source)
     scalars = parsed["scalars"]
     arrays = parsed["arrays"]
+    preview_values = (
+        scalars["DEPLOY_COMPONENTS"],
+        scalars["ANSIBLE_NODE_IP"],
+        scalars["ANSIBLE_NODE_HOSTNAME"],
+    )
+    if any(not value.isascii() for value in preview_values):
+        raise MigrationError("legacy preview fields must be ASCII")
     components = [name for name in scalars["DEPLOY_COMPONENTS"].split(",") if name]
     return {
         "format": "legacy-env-v0",
@@ -137,15 +159,24 @@ def archive_legacy_env(path: Path, runtime_dir: Path) -> Path:
     source = path.read_bytes()
     if hashlib.sha256(source).hexdigest() != preview["source_sha256"]:
         raise MigrationError("legacy config changed during inspection")
+    return archive_legacy_bytes(path, runtime_dir, source)
+
+
+def archive_legacy_bytes(path: Path, runtime_dir: Path, source: bytes = None) -> Path:
+    """Archive a regular legacy file verbatim without interpreting its contents."""
+    if path.is_symlink() or not path.is_file():
+        raise MigrationError("legacy config must be a regular file")
+    source = path.read_bytes() if source is None else source
     backup_dir = runtime_dir / "legacy-backups"
     backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(str(backup_dir), 0o700)
-    destination = backup_dir / (preview["source_sha256"] + ".config.env")
+    digest = hashlib.sha256(source).hexdigest()
+    destination = backup_dir / (digest + ".config.env")
     if destination.exists():
         if destination.read_bytes() != source:
             raise MigrationError("legacy backup digest collision")
         return destination
-    temporary = backup_dir / ("." + preview["source_sha256"] + ".tmp")
+    temporary = backup_dir / ("." + digest + ".tmp")
     descriptor = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as stream:

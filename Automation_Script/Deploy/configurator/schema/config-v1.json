@@ -37,6 +37,9 @@
               "mysql"
             ]
           }
+        },
+        "rabbitmq_rebuild_cluster": {
+          "type": "boolean"
         }
       }
     },

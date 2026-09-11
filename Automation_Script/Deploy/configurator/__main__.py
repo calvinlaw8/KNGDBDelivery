@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .generations import GenerationError, new_utc_generation_id, publish_staging, resolve_current
 from .legacy_input import LegacyInputError, config_from_nul_bytes
-from .migrate import MigrationError, archive_legacy_env, inspect_legacy_env
+from .migrate import MigrationError, archive_legacy_bytes, archive_legacy_env, inspect_legacy_env
 from .render import RenderError, render_files, write_staging_directory
 from .schema import ConfigSchemaError, load_config
 from .validate import format_text, validation_result
@@ -70,6 +70,9 @@ def main(argv=None) -> int:
     archive_parser = subparsers.add_parser("archive-legacy", help="atomically archive a recognized legacy config.env")
     archive_parser.add_argument("config", type=Path)
     archive_parser.add_argument("--runtime-dir", type=Path, required=True)
+    archive_raw_parser = subparsers.add_parser("archive-legacy-raw", help="atomically archive a legacy file without interpreting it")
+    archive_raw_parser.add_argument("config", type=Path)
+    archive_raw_parser.add_argument("--runtime-dir", type=Path, required=True)
     doctor_parser = subparsers.add_parser("doctor", help="check local Python and standard-library prerequisites")
     doctor_parser.add_argument("--format", choices=("json", "text"), default="text")
     subparsers.add_parser("workbench", help="start the loopback-only offline configuration workbench")
@@ -128,6 +131,15 @@ def main(argv=None) -> int:
             backup = archive_legacy_env(arguments.config, arguments.runtime_dir)
         except (MigrationError, OSError) as error:
             print("legacy archive failed: {0}".format(error), file=sys.stderr)
+            return 2
+        print(str(backup))
+        return 0
+
+    if arguments.command == "archive-legacy-raw":
+        try:
+            backup = archive_legacy_bytes(arguments.config, arguments.runtime_dir)
+        except (MigrationError, OSError) as error:
+            print("legacy raw archive failed: {0}".format(error), file=sys.stderr)
             return 2
         print(str(backup))
         return 0

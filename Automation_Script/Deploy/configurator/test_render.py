@@ -76,6 +76,27 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, "a password with 'quote'\n12\n")
 
+    def test_rabbitmq_only_runtime_config_does_not_expand_unselected_arrays(self):
+        config = config_for(("rabbitmq",))
+        config["secrets"].update(
+            {
+                "rabbitmq_cookie": "EXAMPLE_ONLY",
+                "rabbitmq_admin_password": "EXAMPLE_ONLY",
+            }
+        )
+        files = render_files(config, Path("/tmp/project"), Path("/tmp/runtime"), TEMPLATES)
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.env"
+            config_path.write_text(files["config.env"], encoding="utf-8")
+            completed = subprocess.run(
+                ["/bin/bash", "-c", 'set -u; source "$1"; printf "%s\\n" "${#DB_IPS[@]}"', "bash", str(config_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout, "3\n")
+
     def test_group_vars_use_json_values_and_explicit_roles(self):
         files = render_files(self.config, Path("/tmp/project"), Path("/tmp/runtime"), TEMPLATES)
         self.assertIn('redis_replicas: [\n  "192.0.2.22",', files["playbooks/group_vars/redis.yml"])

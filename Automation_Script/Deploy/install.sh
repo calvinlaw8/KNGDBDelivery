@@ -47,13 +47,29 @@ show_legacy_config_gate() {
   warn "检测到旧版运行时配置；出于安全原因不会执行或自动猜测迁移。"
   if ! preview=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${python_bin}" -m configurator inspect-legacy "${legacy_config}"); then
-    die "旧版运行时配置包含未知、损坏或不安全语法；请保留原文件并重新录入配置"
+    backup=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${python_bin}" -m configurator archive-legacy-raw "${legacy_config}" --runtime-dir "${RUNTIME_DIR}") || \
+      die "旧版运行时配置无法安全归档；原文件未覆盖，停止继续"
+    warn "旧版运行时配置无法识别，已原样只读归档且不会复用：${backup}"
+    warn "请通过本向导重新录入配置；原文件未覆盖。"
+    return 0
   fi
   printf '旧配置脱敏识别结果：%s\n' "${preview}"
   backup=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${python_bin}" -m configurator archive-legacy "${legacy_config}" --runtime-dir "${RUNTIME_DIR}") || \
     die "旧版运行时配置只读归档失败；原文件未覆盖，停止继续"
   warn "旧格式缺少完整版本化数据，必须重新录入才能生成新 generation；原文件未覆盖，只读备份：${backup}"
+}
+
+start_workbench() {
+  local python_bin
+  python_bin="$(command -v python3 || true)"
+  [[ -n "${python_bin}" ]] || die "网页配置工作台需要 Python 3；请安装 Python 3.9 或更高版本后重试"
+  info "正在启动本机网页配置工作台"
+  printf '请在浏览器中填写配置、执行连接预检，并在页面内确认生成和部署。\n'
+  printf '终端仅显示本地 URL 与一次性配对码；按 Ctrl-C 可停止工作台。\n\n'
+  exec env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python_bin}" -m configurator workbench
 }
 
 ask() {
@@ -739,6 +755,8 @@ main() {
   warn "本方式仅适用于受控部署网络。"
   warn "不建议在不可信网络中执行。"
   refresh_current_generation || show_legacy_config_gate
+  start_workbench
+
   printf '\n'
   printf '本向导将配置 Redis、RabbitMQ、MongoDB、MySQL 四套三节点服务，并通过离线 Ansible 完成部署。\n'
   printf '部署版本：Redis 8.2.8；RabbitMQ 4.2.9 + Erlang 27.3.4.16-1；MongoDB 8.2.12；MySQL 8.4.11。\n'

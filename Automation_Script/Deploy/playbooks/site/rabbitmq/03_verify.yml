@@ -36,10 +36,14 @@
           ansible.builtin.shell:
             cmd: >
               rabbitmqctl cluster_status 2>/dev/null |
-              grep -c "{{ rabbitmq_node_prefix }}" || true
+              sed -n '/Disk Nodes/,/Running Nodes/p' |
+              grep '^rabbit@' |
+              sort | paste -sd ',' -
           register: final_cluster
           changed_when: false
-          failed_when: final_cluster.stdout | int < 3
+          vars:
+            expected_cluster_nodes: "{{ rabbitmq_cluster_hostnames | map('regex_replace', '^', 'rabbit@') | sort | join(',') }}"
+          failed_when: final_cluster.stdout | trim != expected_cluster_nodes
           become: true
 
         - name: 显示集群 Disc Nodes 摘要
@@ -62,10 +66,99 @@
           delegate_to: "{{ inventory_hostname }}"
           register: mgmt_check
 
+        - name: 生成临时消息闭环标识
+          ansible.builtin.set_fact:
+            message_loop_queue: "ecopilot-ha-verify-{{ lookup('pipe', 'date +%s') }}-{{ 999999 | random }}"
+            message_loop_marker: "ecopilot-message-{{ lookup('pipe', 'date +%s') }}-{{ 999999 | random }}"
+          no_log: true
+
+        - name: 执行临时队列消息发布与消费闭环
+          block:
+            - name: 创建临时验证队列
+              ansible.builtin.uri:
+                url: "http://localhost:{{ rabbitmq_management_port }}/api/queues/%2F/{{ message_loop_queue }}"
+                method: PUT
+                user: "{{ rabbitmq_admin_user }}"
+                password: "{{ rabbitmq_admin_password }}"
+                force_basic_auth: true
+                timeout: 10
+                body_format: json
+                body:
+                  auto_delete: false
+                  durable: true
+                  arguments:
+                    x-queue-type: quorum
+                status_code: 201
+              register: message_queue_create
+              changed_when: false
+              no_log: true
+              become: true
+
+            - name: 发布验证消息
+              ansible.builtin.uri:
+                url: "http://localhost:{{ rabbitmq_management_port }}/api/exchanges/%2F/amq.default/publish"
+                method: POST
+                user: "{{ rabbitmq_admin_user }}"
+                password: "{{ rabbitmq_admin_password }}"
+                force_basic_auth: true
+                timeout: 10
+                body_format: json
+                body:
+                  properties: {}
+                  routing_key: "{{ message_loop_queue }}"
+                  payload: "{{ message_loop_marker }}"
+                  payload_encoding: string
+                status_code: 200
+              register: message_publish
+              changed_when: false
+              failed_when: not message_publish.json.routed | default(false)
+              no_log: true
+              become: true
+
+            - name: 消费并确认验证消息
+              ansible.builtin.uri:
+                url: "http://localhost:{{ rabbitmq_management_port }}/api/queues/%2F/{{ message_loop_queue }}/get"
+                method: POST
+                user: "{{ rabbitmq_admin_user }}"
+                password: "{{ rabbitmq_admin_password }}"
+                force_basic_auth: true
+                timeout: 10
+                body_format: json
+                body:
+                  count: 1
+                  ackmode: ack_requeue_false
+                  encoding: auto
+                  truncate: 50000
+                status_code: 200
+              register: message_consume
+              changed_when: false
+              failed_when: >-
+                message_consume.json | length != 1 or
+                message_consume.json[0].payload != message_loop_marker
+              no_log: true
+              become: true
+          always:
+            - name: 删除临时验证队列
+              ansible.builtin.uri:
+                url: "http://localhost:{{ rabbitmq_management_port }}/api/queues/%2F/{{ message_loop_queue }}"
+                method: DELETE
+                user: "{{ rabbitmq_admin_user }}"
+                password: "{{ rabbitmq_admin_password }}"
+                force_basic_auth: true
+                timeout: 10
+                status_code: [204, 404]
+              when: message_loop_queue is defined
+              changed_when: false
+              failed_when: false
+              no_log: true
+              become: true
+
         - name: 验证通过摘要
           ansible.builtin.debug:
             msg: >-
               RabbitMQ 集群验证通过 ✅
-              集群节点数: {{ final_cluster.stdout }}
+              集群节点数: {{ (final_cluster.stdout | trim).split(',') | length }}
+              节点集合: {{ final_cluster.stdout | trim }}
               Management UI: HTTP {{ mgmt_check.status }}
+              消息闭环: 发布与消费成功
               种子节点: {{ rabbitmq_seed_hostname }} ({{ rabbitmq_seed_node_ip }})

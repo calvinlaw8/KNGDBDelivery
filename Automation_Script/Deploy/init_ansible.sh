@@ -44,6 +44,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${DELIVERY_CONFIG_FILE:-${SCRIPT_DIR}/config.env}"
 [[ -f "${CONFIG_FILE}" ]] || err "配置文件不存在：${CONFIG_FILE}"
 source "${CONFIG_FILE}"
+LOCAL_PLAYBOOK_DIR="${DELIVERY_PLAYBOOK_DIR:-${LOCAL_PLAYBOOK_DIR}}"
 DELIVERY_LOG_DIR="${DELIVERY_LOG_DIR:-$(cd "$(dirname "${CONFIG_FILE}")" && pwd)/logs}"
 DELIVERY_STATE_DIR="${DELIVERY_STATE_DIR:-$(cd "$(dirname "${CONFIG_FILE}")" && pwd)/state}"
 VERBOSE=0
@@ -62,7 +63,7 @@ SELECTED_DB_HOSTNAMES=()
 
 [[ -n "${ANSIBLE_NODE_USER:-}" ]] || err "ANSIBLE_NODE_USER 未配置"
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
+SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o PreferredAuthentications=password -o PubkeyAuthentication=no"
 REMOTE="${ANSIBLE_NODE_USER}@${ANSIBLE_NODE_IP}"
 
 # 所有本地→管理节点的 SSH/SCP 均通过此函数，密码用环境变量传递（不暴露在进程列表）
@@ -72,20 +73,15 @@ ssh_run() {
 }
 
 scp_run() {
-  local attempt sshpass_file
-  sshpass_file="$(mktemp "${TMPDIR:-/tmp}/ecopilot-scp-pass.XXXXXX")"
-  chmod 600 "${sshpass_file}"
-  printf '%s\n' "${ANSIBLE_NODE_PASS}" > "${sshpass_file}"
+  local attempt
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if sshpass -f "${sshpass_file}" scp ${SSH_OPTS} \
+    if SSHPASS="${ANSIBLE_NODE_PASS}" sshpass -e scp ${SSH_OPTS} \
       -o PreferredAuthentications=password \
       -o PubkeyAuthentication=no "$@"; then
-      rm -f -- "${sshpass_file}"
       return 0
     fi
     [[ "${attempt}" -lt 10 ]] && sleep 5
   done
-  rm -f -- "${sshpass_file}"
   return 1
 }
 
@@ -959,6 +955,13 @@ _run_playbook_stage() {
   local stage="$1"          # 阶段名称（用于显示）
   local tags="$2"           # --tags 参数，preflight 不传 tags 时留空
   local playbook="$3"       # 远程 playbook 路径
+  local extra_vars="-e @${REMOTE_PLAYBOOK_DIR}/group_vars/all.yml"
+
+  case "${tags}" in
+    redis|rabbitmq|mongodb|mysql)
+      extra_vars="${extra_vars} -e @${REMOTE_PLAYBOOK_DIR}/group_vars/${tags}.yml"
+      ;;
+  esac
 
   local t0; t0=$(date +%s)
   echo ""
@@ -967,7 +970,7 @@ _run_playbook_stage() {
   printf "│   开始：%-38s│\n" "$(date '+%H:%M:%S')"
   echo "└─────────────────────────────────────────────────"
 
-  local cmd="ansible-playbook ${playbook} --limit '${SELECTED_LIMIT_PATTERN}' --extra-vars 'selected_components=${SELECTED_COMPONENTS_CSV}'"
+  local cmd="ansible-playbook ${playbook} --limit '${SELECTED_LIMIT_PATTERN}' ${extra_vars} --extra-vars 'selected_components=${SELECTED_COMPONENTS_CSV}'"
   [[ -n "${tags}" ]] && cmd="${cmd} --tags ${tags}"
 
   mkdir -p "${DELIVERY_LOG_DIR}"
@@ -1039,6 +1042,7 @@ _run_playbook_stage() {
 deploy_all() {
   local TOTAL_T0; TOTAL_T0=$(date +%s)
   STATE_OPERATION="deploy"
+  refresh_selected_topology
 
   echo ""
   echo "=================================================="
@@ -1064,10 +1068,10 @@ deploy_all() {
   _run_playbook_stage \
     "Preflight（服务器预检 + 初始化）" \
     "" \
-    "~/playbooks/preflights/00_preflight.yml ~/playbooks/preflights/01_server_init.yml"
+    "${REMOTE_PLAYBOOK_DIR}/preflights/00_preflight.yml ${REMOTE_PLAYBOOK_DIR}/preflights/01_server_init.yml"
 
   if component_is_selected redis; then
-    if _run_playbook_stage "Redis 8.2.8 主从 + Sentinel" "redis" "~/playbooks/site/site.yml"; then
+    if _run_playbook_stage "Redis 8.2.8 主从 + Sentinel" "redis" "${REMOTE_PLAYBOOK_DIR}/site/site.yml"; then
       record_component_state redis verified
     else
       record_component_state redis failed
@@ -1079,7 +1083,7 @@ deploy_all() {
   if component_is_selected rabbitmq; then
     echo ""
     warn "RabbitMQ 阶段：需安装 RabbitMQ 4.2.9 + Erlang 27.3.4.16，请耐心等待..."
-    if _run_playbook_stage "RabbitMQ 4.2.9 集群" "rabbitmq" "~/playbooks/site/site.yml"; then
+    if _run_playbook_stage "RabbitMQ 4.2.9 集群" "rabbitmq" "${REMOTE_PLAYBOOK_DIR}/site/site.yml"; then
       record_component_state rabbitmq verified
     else
       record_component_state rabbitmq failed
@@ -1088,7 +1092,7 @@ deploy_all() {
   fi
 
   if component_is_selected mongodb; then
-    if _run_playbook_stage "MongoDB 8.2.12 副本集" "mongodb" "~/playbooks/site/site.yml"; then
+    if _run_playbook_stage "MongoDB 8.2.12 副本集" "mongodb" "${REMOTE_PLAYBOOK_DIR}/site/site.yml"; then
       record_component_state mongodb verified
     else
       record_component_state mongodb failed
@@ -1100,7 +1104,7 @@ deploy_all() {
   if component_is_selected mysql; then
     echo ""
     warn "MySQL 阶段：离线 .deb 安装并串行初始化数据目录，请耐心等待..."
-    if _run_playbook_stage "MySQL 8.4.11 GTID 主从 + Keepalived VIP" "mysql" "~/playbooks/site/site.yml"; then
+    if _run_playbook_stage "MySQL 8.4.11 GTID 主从 + Keepalived VIP" "mysql" "${REMOTE_PLAYBOOK_DIR}/site/site.yml"; then
       record_component_state mysql verified
     else
       record_component_state mysql failed
@@ -1111,7 +1115,7 @@ deploy_all() {
   _run_playbook_stage \
     "部署后终检（dpkg 审计）" \
     "" \
-    "~/playbooks/preflights/02_postflight.yml"
+    "${REMOTE_PLAYBOOK_DIR}/preflights/02_postflight.yml"
 
   local total_elapsed=$(( $(date +%s) - TOTAL_T0 ))
   local tmm=$(( total_elapsed / 60 ))
@@ -1149,10 +1153,10 @@ verify_selected_components() {
   _run_playbook_stage \
     "Preflight（选中节点与离线载荷）" \
     "preflight" \
-    "~/playbooks/preflights/00_preflight.yml"
+    "${REMOTE_PLAYBOOK_DIR}/preflights/00_preflight.yml"
 
   for component in "${SELECTED_COMPONENTS[@]}"; do
-    if _run_playbook_stage "${component} 运行状态验证" "${component}-verify" "~/playbooks/site/site.yml"; then
+    if _run_playbook_stage "${component} 运行状态验证" "${component}-verify" "${REMOTE_PLAYBOOK_DIR}/site/site.yml"; then
       record_component_state "${component}" verified
     else
       record_component_state "${component}" failed
@@ -1163,7 +1167,7 @@ verify_selected_components() {
   _run_playbook_stage \
     "部署后终检（选中节点 dpkg 审计）" \
     "postflight" \
-    "~/playbooks/preflights/02_postflight.yml"
+    "${REMOTE_PLAYBOOK_DIR}/preflights/02_postflight.yml"
 
   ok "所选组件的只读验证通过"
 }

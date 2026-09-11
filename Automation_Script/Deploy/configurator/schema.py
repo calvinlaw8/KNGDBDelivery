@@ -66,7 +66,8 @@ CONFIG_SCHEMA = {
                     "minItems": 1,
                     "uniqueItems": True,
                     "items": {"type": "string", "enum": list(COMPONENT_NAMES)},
-                }
+                },
+                "rabbitmq_rebuild_cluster": {"type": "boolean"},
             },
         },
         "management": {
@@ -177,6 +178,8 @@ def _type_matches(value: Any, expected: str) -> bool:
         return isinstance(value, list)
     if expected == "string":
         return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
     if expected == "integer":
         return isinstance(value, int) and not isinstance(value, bool)
     return False

@@ -191,6 +191,30 @@ show_legacy_config_gate
             self.assertIn('"migration_status": "reentry_required"', completed.stdout)
             self.assertNotIn("RedisPass", completed.stdout + completed.stderr)
 
+    def test_unrecognized_legacy_gate_archives_and_allows_reentry(self):
+        script = r'''
+source "$2"
+PROJECT_ROOT="$1/project"
+RUNTIME_DIR="$1/.runtime"
+mkdir -p "${RUNTIME_DIR}"
+printf '\000not-valid-shell\n' > "${RUNTIME_DIR}/config.env"
+show_legacy_config_gate
+'''
+        with tempfile.TemporaryDirectory() as parent:
+            completed = subprocess.run(
+                ["/bin/bash", "-c", script, "test-legacy-gate", parent, str(INSTALL)],
+                cwd=str(DEPLOY_DIR.parent.parent),
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            backups = list((Path(parent) / ".runtime" / "legacy-backups").glob("*.config.env"))
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o400)
+            self.assertIn("无法识别", completed.stdout + completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

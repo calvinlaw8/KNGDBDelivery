@@ -204,11 +204,11 @@ check_configurator() {
     fail "统一配置模型要求 Python 3.9 或更高版本"
     return
   fi
-  if ! (cd "${configurator_dir}" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -q -p 'test_*.py'); then
+  if ! (cd "${SCRIPT_DIR}" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m unittest discover -q -s configurator -p 'test_*.py'); then
     fail "统一配置模型测试失败"
     return
   fi
-  if ! (cd "${configurator_dir}" && PYTHONDONTWRITEBYTECODE=1 python3 -c 'import json; from pathlib import Path; from schema import CONFIG_SCHEMA; saved=json.loads(Path("schema/config-v1.json").read_text(encoding="utf-8")); raise SystemExit(saved != CONFIG_SCHEMA)'); then
+  if ! (cd "${SCRIPT_DIR}" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -c 'import json; from pathlib import Path; from configurator.schema import CONFIG_SCHEMA; saved=json.loads(Path("configurator/schema/config-v1.json").read_text(encoding="utf-8")); raise SystemExit(saved != CONFIG_SCHEMA)'); then
     fail "生成的 config-v1.json 与权威 Python Schema 不一致"
   fi
   [[ -f "${generated_schema}" ]] || fail "缺少生成的配置 Schema：${generated_schema}"

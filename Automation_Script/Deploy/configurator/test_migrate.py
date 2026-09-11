@@ -4,7 +4,7 @@ import stat
 import tempfile
 import unittest
 
-from migrate import MigrationError, archive_legacy_env, inspect_legacy_env, migrate_json_config, parse_legacy_env_bytes
+from migrate import MigrationError, archive_legacy_bytes, archive_legacy_env, inspect_legacy_env, migrate_json_config, parse_legacy_env_bytes
 from render import render_runtime_config
 from schema import load_config
 
@@ -27,6 +27,28 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(result["preview"]["components"], ["redis"])
         self.assertNotIn(self.config["secrets"]["management_ssh_password"], encoded)
         self.assertNotIn(self.config["secrets"]["redis_password"], encoded)
+
+    def test_non_utf8_secret_bytes_are_recognized_and_archived_without_previewing_them(self):
+        secret = b"\xff\xfe"
+        source = self.legacy.replace(b"ANSIBLE_NODE_PASS='manager-pass'", b"ANSIBLE_NODE_PASS='" + secret + b"'", 1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "config.env"
+            path.write_bytes(source)
+            result = inspect_legacy_env(path)
+            archived = archive_legacy_env(path, root / "runtime")
+            archived_bytes = archived.read_bytes()
+        self.assertEqual(result["migration_status"], "reentry_required")
+        self.assertEqual(archived_bytes, source)
+        self.assertNotIn(secret.decode("latin-1"), json.dumps(result, ensure_ascii=False))
+
+    def test_non_utf8_preview_fields_are_rejected(self):
+        source = self.legacy.replace(b"ANSIBLE_NODE_IP=", b"ANSIBLE_NODE_IP='\xff'\nANSIBLE_NODE_IP=", 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.env"
+            path.write_bytes(source)
+            with self.assertRaises(MigrationError):
+                inspect_legacy_env(path)
 
     def test_shell_constructs_unknown_names_and_broken_arrays_are_rejected(self):
         attacks = (
@@ -63,6 +85,18 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), before)
             self.assertEqual(first.read_bytes(), before)
             self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o400)
+
+    def test_unrecognized_legacy_bytes_can_only_be_archived_verbatim(self):
+        source = b"\x00not a shell config\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "config.env"
+            path.write_bytes(source)
+            with self.assertRaises(MigrationError):
+                inspect_legacy_env(path)
+            archived = archive_legacy_bytes(path, root / "runtime")
+            self.assertEqual(archived.read_bytes(), source)
+            self.assertEqual(stat.S_IMODE(archived.stat().st_mode), 0o400)
 
     def test_inspection_never_executes_legacy_file(self):
         with tempfile.TemporaryDirectory() as directory:

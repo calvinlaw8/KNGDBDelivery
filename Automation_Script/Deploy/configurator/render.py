@@ -108,6 +108,8 @@ def render_group_vars(config: Mapping[str, Any], template_dir: Path) -> Dict[str
             "rabbitmq_seed_node_ip": seed["ip"],
             "rabbitmq_seed_hostname": seed["hostname"],
             "rabbitmq_node_prefix": _rabbitmq_prefix(seed["hostname"]),
+            "rabbitmq_cluster_hostnames": [node["hostname"] for node in rabbitmq["nodes"]],
+            "rabbitmq_rebuild_cluster": config["deployment"].get("rabbitmq_rebuild_cluster", False),
             "erlang_cookie": secrets["rabbitmq_cookie"],
             "rabbitmq_admin_user": rabbitmq["service"]["admin_user"],
             "rabbitmq_admin_password": secrets["rabbitmq_admin_password"],
@@ -202,12 +204,10 @@ def render_runtime_config(config: Mapping[str, Any], project_root: Path, runtime
             for index, node in enumerate(components[component]["nodes"]):
                 lines.append("{0}_IPS[{1}]={2}".format(prefix, index, bash_quote(node["ip"])))
                 lines.append("{0}_HOSTNAMES[{1}]={2}".format(prefix, index, bash_quote(node["hostname"])))
-    lines.extend(
-        (
-            'DB_IPS=("${REDIS_IPS[@]}" "${RABBITMQ_IPS[@]}" "${MONGODB_IPS[@]}" "${MYSQL_IPS[@]}")',
-            'DB_HOSTNAMES=("${REDIS_HOSTNAMES[@]}" "${RABBITMQ_HOSTNAMES[@]}" "${MONGODB_HOSTNAMES[@]}" "${MYSQL_HOSTNAMES[@]}")',
-        )
-    )
+    selected_prefixes = [component.upper() for component in selected]
+    db_ips = " ".join('"${' + prefix + '_IPS[@]}"' for prefix in selected_prefixes)
+    db_hostnames = " ".join('"${' + prefix + '_HOSTNAMES[@]}"' for prefix in selected_prefixes)
+    lines.extend(("DB_IPS=({0})".format(db_ips), "DB_HOSTNAMES=({0})".format(db_hostnames)))
     return "\n".join(lines) + "\n"
 
 

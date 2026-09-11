@@ -7,12 +7,12 @@
 #   使节点间能通过主机名互相解析（RabbitMQ join / MongoDB rs / MySQL report_host）
 #
 # 数据来源：
-#   init_ansible.sh Step 6b 已将 config.env 中定义的 IP→主机名 写入
-#   Ansible-01 自身的 /etc/hosts，格式如下：
-#     # BEGIN DB_CLUSTER_HOSTS
+#   init_ansible.sh Step 6b 已将 config.env 中定义的 IP→主机名写入
+#   Ansible-01 自身的 /etc/hosts。current generation 使用组件化块：
+#     # BEGIN ECOPILOT_COMPONENT redis
 #     <NODE_IP_1>       <NODE_HOSTNAME_1>
-#     ...
-#     # END DB_CLUSTER_HOSTS
+#     # END ECOPILOT_COMPONENT redis
+#   为兼容旧 generation，仍识别 DB_CLUSTER_HOSTS 全局块。
 #   本 Playbook 从 Ansible-01 的 /etc/hosts 动态读取这段内容，
 #   再通过 blockinfile 推送到 12 台 DB 节点，不做任何硬编码。
 #
@@ -28,13 +28,15 @@
   tags: server-init
 
   tasks:
-    - name: 提取 BEGIN…END 之间的主机条目
+    - name: 提取受管数据库主机条目
       ansible.builtin.shell: |
-        sed -n '/^# BEGIN DB_CLUSTER_HOSTS$/,/^# END DB_CLUSTER_HOSTS$/{
-          /^# BEGIN DB_CLUSTER_HOSTS$/d
-          /^# END DB_CLUSTER_HOSTS$/d
-          p
-        }' /etc/hosts
+        awk '
+          /^# BEGIN ECOPILOT_COMPONENT (redis|rabbitmq|mongodb|mysql)$/ { component=1; next }
+          /^# END ECOPILOT_COMPONENT (redis|rabbitmq|mongodb|mysql)$/ { component=0; next }
+          /^# BEGIN DB_CLUSTER_HOSTS$/ { legacy=1; next }
+          /^# END DB_CLUSTER_HOSTS$/ { legacy=0; next }
+          (component || legacy) && NF >= 2 { print }
+        ' /etc/hosts
       register: db_hosts_raw
       changed_when: false
 
@@ -42,7 +44,7 @@
       ansible.builtin.assert:
         that: db_hosts_raw.stdout | length > 0
         fail_msg: >-
-          /etc/hosts 中未找到 DB 集群主机条目（# BEGIN DB_CLUSTER_HOSTS … # END DB_CLUSTER_HOSTS）。
+          /etc/hosts 中未找到受管数据库主机条目（ECOPILOT_COMPONENT 或 DB_CLUSTER_HOSTS）。
           请先执行 init_ansible.sh 完成 Step 6b，再运行本 Playbook。
 
     - name: 将提取结果存为全局 fact
