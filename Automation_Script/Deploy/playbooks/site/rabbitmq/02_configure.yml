@@ -319,19 +319,52 @@
 
     - name: 等待并验证种子节点 RabbitMQ 完全启动
       block:
-        - name: 等待种子节点 RabbitMQ 完全启动
-          ansible.builtin.command: timeout 10s systemctl is-active rabbitmq-server
-          register: rmq_seed_active
+        - name: 连续两次确认种子节点 RabbitMQ 稳定可用
+          ansible.builtin.shell:
+            cmd: |
+              for sample in 1 2; do
+                active=$(timeout 10s systemctl is-active rabbitmq-server 2>&1)
+                active_rc=$?
+                if [ "$active_rc" -ne 0 ] || [ "$active" != "active" ]; then
+                  printf 'RMQ_READINESS_CATEGORY=systemd_not_active state=%s rc=%s\n' "$active" "$active_rc"
+                  exit 1
+                fi
+
+                app_check=$(timeout 10s rabbitmq-diagnostics -q check_running 2>&1)
+                app_rc=$?
+                if [ "$app_rc" -ne 0 ]; then
+                  if printf '%s\n' "$app_check" | grep -Eiq 'timeout_waiting_for_leader|timed out.*leader'; then
+                    printf 'RMQ_READINESS_CATEGORY=khepri_leader_timeout rc=%s\n' "$app_rc"
+                  else
+                    printf 'RMQ_READINESS_CATEGORY=rabbit_app_not_running rc=%s\n' "$app_rc"
+                  fi
+                  exit 1
+                fi
+
+                ping_check=$(timeout 10s rabbitmq-diagnostics -q ping 2>&1)
+                ping_rc=$?
+                if [ "$ping_rc" -ne 0 ]; then
+                  printf 'RMQ_READINESS_CATEGORY=erlang_node_unreachable rc=%s\n' "$ping_rc"
+                  exit 1
+                fi
+
+                [ "$sample" -eq 2 ] || sleep 2
+              done
+              printf '%s\n' 'RMQ_READINESS_CATEGORY=stable_two_samples'
+          register: rmq_seed_readiness
           changed_when: false
-          until: rmq_seed_active.rc == 0 and rmq_seed_active.stdout == "active"
+          failed_when: false
+          until: rmq_seed_readiness.rc == 0
           retries: 72
           delay: 5
 
-        - name: 验证种子节点 rabbitmq-server 状态
-          ansible.builtin.command: rabbitmq-diagnostics -q ping
-          register: rmq_ping
-          changed_when: false
-          failed_when: rmq_ping.rc != 0
+        - name: 种子节点稳定性探针失败时终止
+          ansible.builtin.fail:
+            msg: >-
+              RabbitMQ 种子节点未通过连续两次稳定性确认；
+              分类={{ rmq_seed_readiness.stdout | default('未返回分类') | trim }}；
+              stderr={{ rmq_seed_readiness.stderr | default('') | trim }}
+          when: rmq_seed_readiness.rc != 0
       rescue:
         - name: 采集种子节点启动失败后的只读诊断
           ansible.builtin.shell:
@@ -347,6 +380,13 @@
           register: rmq_seed_startup_diagnostics
           changed_when: false
           failed_when: false
+
+        - name: 标记 Khepri leader 等待超时
+          ansible.builtin.debug:
+            msg: "RabbitMQ readiness category: khepri_leader_timeout"
+          when: >-
+            'khepri_leader_timeout' in
+            (rmq_seed_readiness.stdout | default(''))
 
         - name: 输出种子节点启动失败诊断
           ansible.builtin.debug:
@@ -402,9 +442,21 @@
           when: cluster_check.stdout | int == 0
           block:
             - name: 停止 App 后再加入集群
-              ansible.builtin.command: rabbitmqctl stop_app
+              ansible.builtin.command: timeout 30s rabbitmqctl stop_app
+              register: rabbitmq_stop_app_result
+              changed_when: rabbitmq_stop_app_result.rc == 0
+              failed_when: false
               when: rabbitmq_rebuild_cluster | bool or not (rabbitmq_existing_cluster | default(false) | bool)
               become: true
+
+            - name: 终止失败的 RabbitMQ App 停止并分类原因
+              ansible.builtin.fail:
+                msg: >-
+                  RabbitMQ stop_app
+                  {{ '超时（30 秒）' if rabbitmq_stop_app_result.rc == 124 else '失败' }}；
+                  rc={{ rabbitmq_stop_app_result.rc }}；
+                  stderr={{ rabbitmq_stop_app_result.stderr | default('') | trim }}
+              when: rabbitmq_stop_app_result.rc != 0
 
             - name: 重置节点（普通加入路径）
               ansible.builtin.command: rabbitmqctl reset
@@ -439,8 +491,20 @@
               when: rabbitmq_join_cluster_result.rc != 0
 
             - name: 启动 App
-              ansible.builtin.command: rabbitmqctl start_app
+              ansible.builtin.command: timeout 30s rabbitmqctl start_app
+              register: rabbitmq_start_app_result
+              changed_when: rabbitmq_start_app_result.rc == 0
+              failed_when: false
               become: true
+
+            - name: 终止失败的 RabbitMQ App 启动并分类原因
+              ansible.builtin.fail:
+                msg: >-
+                  RabbitMQ start_app
+                  {{ '超时（30 秒）' if rabbitmq_start_app_result.rc == 124 else '失败' }}；
+                  rc={{ rabbitmq_start_app_result.rc }}；
+                  stderr={{ rabbitmq_start_app_result.stderr | default('') | trim }}
+              when: rabbitmq_start_app_result.rc != 0
 
         - name: 验证集群成员数（应 >= 2）
           ansible.builtin.shell:
