@@ -82,9 +82,10 @@
         content: |
           [mysqld]
           # 基础配置
-          basedir          = /usr
+          basedir          = {{ mysql_base_dir }}
+          lc-messages-dir  = /usr/share/mysql-8.4
           datadir          = {{ mysql_data_dir }}
-          socket           = /tmp/mysql.sock
+          socket           = {{ mysql_socket }}
           pid-file         = {{ mysql_data_dir }}/mysqld.pid
           port             = {{ mysql_port }}
 
@@ -116,7 +117,7 @@
           log-error            = {{ mysql_log_dir }}/mysqld.err
 
           [client]
-          socket = /tmp/mysql.sock
+          socket = {{ mysql_socket }}
         owner: root
         group: root
         mode: "0644"
@@ -133,6 +134,23 @@
       ansible.builtin.stat:
         path: "{{ mysql_data_dir }}/mysql"
       register: mysql_db_dir
+
+    - name: 检查未初始化数据目录是否为空
+      ansible.builtin.find:
+        paths: "{{ mysql_data_dir }}"
+        hidden: true
+        recurse: false
+      register: mysql_uninitialized_data_files
+      when: not mysql_db_dir.stat.exists
+      become: true
+
+    - name: 拒绝删除非空且未初始化的 MySQL 数据目录
+      ansible.builtin.assert:
+        that: mysql_uninitialized_data_files.matched | int == 0
+        fail_msg: >-
+          {{ inventory_hostname }} 的 {{ mysql_data_dir }} 非空但未发现 mysql 系统库；
+          为保护既有或失败残留数据，部署不会自动删除该目录。请由授权人员确认后按重建流程处理。
+      when: not mysql_db_dir.stat.exists
 
     - name: 初始化 MySQL 数据目录（mysqld --initialize，约 30-60 秒，每 10 秒汇报一次）
       ansible.builtin.file:
@@ -173,24 +191,12 @@
       poll: 10
       become: true
 
-    - name: 捕获临时 root 密码
-      ansible.builtin.shell:
-        cmd: >
-          grep -oP '(?<=A temporary password is generated for root@localhost: )\S+'
-          {{ mysql_log_dir }}/mysqld.err
-      register: temp_password
-      changed_when: false
-      when: not mysql_db_dir.stat.exists
-      become: true
-      failed_when: temp_password.rc != 0
-
-    - name: 启动 mysqld（使用临时密码）
+    - name: 启动 mysqld
       ansible.builtin.systemd:
         name: "{{ mysql_service_name }}"
         state: started
         enabled: true
         daemon_reload: true
-      when: not mysql_db_dir.stat.exists
       become: true
 
     - name: 等待 mysqld 启动（监听 3306）
@@ -199,90 +205,253 @@
         host: "{{ inventory_hostname }}"
         timeout: 30
       delegate_to: localhost
-      when: not mysql_db_dir.stat.exists
 
-    - name: 修改 root 密码（使用临时密码连接）
-      ansible.builtin.command:
-        argv:
-          - "{{ mysql_client_bin }}"
-          - "--socket=/tmp/mysql.sock"
-          - "--connect-expired-password"
-          - "-u"
-          - root
-          - "-p{{ temp_password.stdout | trim }}"
-          - "-e"
-          - "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
-      when: not mysql_db_dir.stat.exists
-      become: true
-      no_log: true
+    - name: 初始化或验证 MySQL root 认证
+      block:
+        - name: 写入正式 root 客户端临时配置
+          ansible.builtin.copy:
+            dest: /run/ecopilot-mysql-root.cnf
+            content: |
+              [client]
+              user=root
+              password="{{ mysql_root_password | replace('\\', '\\\\') | replace('"', '\\"') }}"
+              protocol=TCP
+              host=127.0.0.1
+              port={{ mysql_port }}
+            owner: root
+            group: root
+            mode: "0600"
+          become: true
+          no_log: true
 
-    # 若数据目录已存在（重新执行时），直接启动
-    - name: 启动 mysqld（幂等，已初始化场景）
-      ansible.builtin.systemd:
-        name: "{{ mysql_service_name }}"
-        state: started
-        enabled: true
-        daemon_reload: true
-      when: mysql_db_dir.stat.exists
-      become: true
+        - name: 检查正式 root 密码是否已生效
+          ansible.builtin.command:
+            argv:
+              - "{{ mysql_client_bin }}"
+              - --defaults-extra-file=/run/ecopilot-mysql-root.cnf
+              - --batch
+              - --skip-column-names
+              - -e
+              - SELECT 1
+          register: configured_root_auth
+          changed_when: false
+          failed_when: false
+          become: true
+          no_log: true
 
-    - name: 等待 mysqld 就绪（已初始化场景）
-      ansible.builtin.wait_for:
-        port: "{{ mysql_port }}"
-        host: "{{ inventory_hostname }}"
-        timeout: 30
-      delegate_to: localhost
-      when: mysql_db_dir.stat.exists
+        - name: 检查本机 root socket 管理认证
+          ansible.builtin.command:
+            argv:
+              - "{{ mysql_client_bin }}"
+              - --no-defaults
+              - --protocol=SOCKET
+              - "--socket={{ mysql_socket }}"
+              - -uroot
+              - --batch
+              - --skip-column-names
+              - -e
+              - SELECT 1
+          register: local_socket_auth
+          changed_when: false
+          failed_when: false
+          when: configured_root_auth.rc != 0
+          become: true
+          no_log: true
 
-    - name: 检查已初始化节点的配置 root 密码是否可用
-      ansible.builtin.command:
-        argv:
-          - "{{ mysql_client_bin }}"
-          - "--socket=/tmp/mysql.sock"
-          - -u
-          - root
-          - "-p{{ mysql_root_password }}"
-          - -e
-          - SELECT 1
-      register: configured_root_auth
-      changed_when: false
-      failed_when: false
-      when: mysql_db_dir.stat.exists
-      become: true
-      no_log: true
+        - name: 捕获临时 root 密码
+          ansible.builtin.shell:
+            cmd: >
+              awk '/A temporary password is generated for root@localhost: / {
+              sub(/^.*: /, ""); print $1
+              }' {{ mysql_log_dir }}/mysqld.err | tail -1
+          register: temp_password
+          changed_when: false
+          failed_when: false
+          when:
+            - configured_root_auth.rc != 0
+            - local_socket_auth.rc != 0
+          become: true
+          no_log: true
 
-    - name: 捕获未完成初始化节点的临时 root 密码
-      ansible.builtin.shell:
-        cmd: >
-          grep -oP '(?<=A temporary password is generated for root@localhost: )\S+'
-          {{ mysql_log_dir }}/mysqld.err
-      register: recovery_temp_password
-      changed_when: false
-      failed_when: false
-      when:
-        - mysql_db_dir.stat.exists
-        - configured_root_auth.rc != 0
-      become: true
-      no_log: true
+        - name: 断言临时 root 密码可用于恢复
+          ansible.builtin.assert:
+            that:
+              - temp_password.rc == 0
+              - temp_password.stdout | trim | length > 0
+            fail_msg: >-
+              MySQL 处于 BROKEN_AUTH：正式 root 密码不可用，且无法从
+              {{ mysql_log_dir }}/mysqld.err 提取临时密码；保留现场并停止。
+          when:
+            - configured_root_auth.rc != 0
+            - local_socket_auth.rc != 0
 
-    - name: 修复已初始化但未完成 root 密码设置的节点
-      ansible.builtin.command:
-        argv:
-          - "{{ mysql_client_bin }}"
-          - "--socket=/tmp/mysql.sock"
-          - --connect-expired-password
-          - -u
-          - root
-          - "-p{{ recovery_temp_password.stdout | trim }}"
-          - -e
-          - "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
-      when:
-        - mysql_db_dir.stat.exists
-        - configured_root_auth.rc != 0
-        - recovery_temp_password.rc == 0
-        - recovery_temp_password.stdout | trim | length > 0
-      become: true
-      no_log: true
+        - name: 写入 root 密码恢复文件
+          when: configured_root_auth.rc != 0
+          no_log: true
+          block:
+            - name: 写入临时 root 客户端配置
+              ansible.builtin.copy:
+                dest: /run/ecopilot-mysql-bootstrap.cnf
+                content: |
+                  [client]
+                  user=root
+                  password="{{ temp_password.stdout | trim | replace('\\', '\\\\') | replace('"', '\\"') }}"
+                  protocol=TCP
+                  host=127.0.0.1
+                  port={{ mysql_port }}
+                owner: root
+                group: root
+                mode: "0600"
+              become: true
+              when: local_socket_auth.rc != 0
+
+            - name: 写入 root 密码变更 SQL
+              ansible.builtin.copy:
+                dest: /run/ecopilot-mysql-bootstrap.sql
+                content: "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password | replace(\"'\", \"''\") }}';\n"
+                owner: root
+                group: root
+                mode: "0600"
+              become: true
+
+        - name: 恢复 root 正式密码
+          ansible.builtin.command:
+            argv:
+              - timeout
+              - "30"
+              - "{{ mysql_client_bin }}"
+              - --no-defaults
+              - --protocol=SOCKET
+              - "--socket={{ mysql_socket }}"
+              - -uroot
+              - --batch
+              - --skip-column-names
+              - -e
+              - "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password | replace(\"'\", \"''\") }}'"
+          register: change_root_password
+          changed_when: change_root_password.rc == 0
+          failed_when: false
+          when:
+            - configured_root_auth.rc != 0
+            - local_socket_auth.rc == 0
+          become: true
+          no_log: true
+
+        - name: 使用临时密码恢复 root 正式密码
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              temp_password="$(awk '/A temporary password is generated for root@localhost: / { sub(/^.*: /, ""); print $1 }' {{ mysql_log_dir }}/mysqld.err | tail -1)"
+              MYSQL_PWD="${temp_password}" timeout 30 {{ mysql_client_bin }} --no-defaults --protocol=TCP --host=127.0.0.1 --port={{ mysql_port }} --user=root --connect-expired-password --batch --skip-column-names -e "source /run/ecopilot-mysql-bootstrap.sql"
+          register: temp_change_root_password
+          changed_when: temp_change_root_password.rc == 0
+          failed_when: false
+          when:
+            - configured_root_auth.rc != 0
+            - local_socket_auth.rc != 0
+          become: true
+          no_log: true
+
+        - name: 为未执行的认证恢复分支补齐返回码
+          ansible.builtin.set_fact:
+            change_root_password: "{{ change_root_password | default({'rc': 1}) }}"
+            temp_change_root_password: "{{ temp_change_root_password | default({'rc': 1}) }}"
+          when: configured_root_auth.rc != 0
+
+        - name: 计算 root 密码恢复返回码
+          ansible.builtin.set_fact:
+            root_password_restore_rc: "{{ (change_root_password.rc if local_socket_auth.rc == 0 else temp_change_root_password.rc) | int }}"
+          when: configured_root_auth.rc != 0
+
+        - name: 验证恢复后的 root 认证插件
+          ansible.builtin.command:
+            argv:
+              - "{{ mysql_client_bin }}"
+              - --defaults-extra-file=/run/ecopilot-mysql-root.cnf
+              - --batch
+              - --skip-column-names
+              - -e
+              - SELECT plugin FROM mysql.user WHERE User='root' AND Host='localhost'
+          register: recovered_root_plugin
+          changed_when: false
+          failed_when: false
+          when:
+            - configured_root_auth.rc != 0
+            - local_socket_auth.rc == 0
+            - change_root_password.rc == 0
+          become: true
+          no_log: true
+
+        - name: 断言 socket 恢复已切换为密码插件
+          ansible.builtin.assert:
+            that:
+              - recovered_root_plugin.stdout | trim == 'caching_sha2_password'
+            fail_msg: "MySQL socket 恢复未切换为密码认证插件；保留现场并停止。"
+          when:
+            - configured_root_auth.rc != 0
+            - local_socket_auth.rc == 0
+            - change_root_password.rc == 0
+
+        - name: 提取脱敏 MySQL 错误编号
+          ansible.builtin.set_fact:
+            mysql_auth_error_code: >-
+              {{ (change_root_password if local_socket_auth.rc == 0 else temp_change_root_password).stderr
+                 | default('')
+                 | regex_search('ERROR [0-9]+')
+                 | default('UNKNOWN', true) }}
+          when:
+            - configured_root_auth.rc != 0
+            - (change_root_password.rc if local_socket_auth.rc == 0 else temp_change_root_password.rc) != 0
+
+        - name: 记录 root 认证状态（脱敏）
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }} root 认证状态：
+              {{ 'CONFIGURED（正式密码已生效）' if configured_root_auth.rc == 0
+                  else ('RECOVERY_AUTH（本机 socket 恢复成功）'
+                  if local_socket_auth.rc == 0 and change_root_password.rc == 0
+                  else ('TEMP_AUTH（临时密码恢复成功）' if local_socket_auth.rc != 0 and temp_change_root_password.rc == 0
+                  else 'BROKEN_AUTH（root 密码变更失败，错误编号 ' ~ mysql_auth_error_code ~ '）')) }}
+
+        - name: 断言 root 密码恢复成功
+          ansible.builtin.assert:
+            that:
+              - configured_root_auth.rc == 0 or root_password_restore_rc == 0
+            fail_msg: >-
+              MySQL root 密码变更失败；敏感 stderr 已隐藏，错误编号
+              {{ mysql_auth_error_code | default('UNKNOWN') }}。
+
+        - name: 使用正式密码执行最终认证验证
+          ansible.builtin.command:
+            argv:
+              - "{{ mysql_client_bin }}"
+              - --defaults-extra-file=/run/ecopilot-mysql-root.cnf
+              - --batch
+              - --skip-column-names
+              - -e
+              - SELECT 1
+          register: final_root_auth
+          changed_when: false
+          become: true
+          no_log: true
+
+        - name: 断言最终 root 认证成功
+          ansible.builtin.assert:
+            that:
+              - final_root_auth.rc == 0
+              - final_root_auth.stdout | trim == '1'
+            fail_msg: "MySQL root 正式密码最终认证失败；节点状态为 BROKEN_AUTH。"
+      always:
+        - name: 清理 MySQL 认证临时文件
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /run/ecopilot-mysql-root.cnf
+            - /run/ecopilot-mysql-bootstrap.cnf
+            - /run/ecopilot-mysql-bootstrap.sql
+          become: true
+          no_log: true
 
     - name: 验证 mysqld 服务状态
       ansible.builtin.command: "systemctl is-active {{ mysql_service_name }}"
@@ -293,4 +462,6 @@
 
     - name: 显示节点初始化结果
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }}: mysqld = {{ mysqld_active.stdout }}, server_id = {{ my_server_id }}"
+        msg: >-
+          {{ inventory_hostname }}: mysqld = {{ mysqld_active.stdout }},
+          server_id = {{ (mysql_nodes | selectattr('ip', 'equalto', inventory_hostname) | list | first).server_id }}

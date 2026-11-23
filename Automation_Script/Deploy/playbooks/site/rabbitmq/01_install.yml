@@ -25,6 +25,51 @@
         mode: "0755"
       become: true
 
+    - name: 安装停服前探测 RabbitMQ 健康复用集群
+      ansible.builtin.shell:
+        cmd: |
+          rabbitmq-diagnostics -q check_running
+          cluster_status=$(rabbitmqctl cluster_status)
+          {% for cluster_hostname in rabbitmq_cluster_hostnames %}
+          printf '%s\n' "$cluster_status" | grep -Fq 'rabbit@{{ cluster_hostname }}' || exit 1
+          {% endfor %}
+      register: rabbitmq_preinstall_cluster_health
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname == rabbitmq_seed_node_ip and not (rabbitmq_rebuild_cluster | bool)
+      become: true
+
+    - name: 保存安装停服前 RabbitMQ 健康复用判定
+      ansible.builtin.set_fact:
+        rabbitmq_existing_cluster_before_install: "{{ rabbitmq_preinstall_cluster_health.rc | default(1) == 0 }}"
+      when: inventory_hostname == rabbitmq_seed_node_ip
+
+    - name: 持久化安装前 RabbitMQ 健康复用判定
+      ansible.builtin.copy:
+        dest: /var/lib/rabbitmq/.ecopilot-existing-cluster-health
+        content: "{{ 'true' if rabbitmq_existing_cluster_before_install | default(false) | bool else 'false' }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      when: inventory_hostname == rabbitmq_seed_node_ip
+      become: true
+
+    - name: 请求停止旧 RabbitMQ 服务（保留节点持久化状态）
+      ansible.builtin.command: systemctl stop --no-block rabbitmq-server.service
+      become: true
+      changed_when: false
+      failed_when: false
+
+    - name: 等待旧 RabbitMQ 服务停止
+      ansible.builtin.command: systemctl is-active rabbitmq-server.service
+      register: old_rabbitmq_status
+      changed_when: false
+      failed_when: false
+      until: old_rabbitmq_status.stdout in ["inactive", "failed"]
+      retries: 30
+      delay: 2
+      become: true
+
     - name: 分发所有 .deb 包
       ansible.builtin.copy:
         src: "{{ rabbitmq_pkg_dir }}/"
@@ -47,6 +92,38 @@
           {{ inventory_hostname }} 暂存目录中 .deb 数量为
           {{ deb_count.stdout }}，请检查上传是否完整。
 
+    - name: 记录已有 policy-rc.d 状态
+      ansible.builtin.stat:
+        path: /usr/sbin/policy-rc.d
+      register: policy_rc_d_original
+      become: true
+
+    - name: 读取已有 policy-rc.d 内容
+      ansible.builtin.slurp:
+        src: /usr/sbin/policy-rc.d
+      register: policy_rc_d_original_content
+      when: policy_rc_d_original.stat.exists
+      become: true
+      no_log: true
+
+    - name: 记录 man-db timer 和 service 状态
+      ansible.builtin.shell:
+        cmd: |
+          printf 'timer_enabled='; systemctl is-enabled man-db.timer 2>/dev/null || true
+          printf 'timer_active='; systemctl is-active man-db.timer 2>/dev/null || true
+          printf 'service_active='; systemctl is-active man-db.service 2>/dev/null || true
+      register: man_db_original_status
+      changed_when: false
+      become: true
+      no_log: true
+
+    - name: 暂停 man-db 后台重建，避免与离线 dpkg 并发
+      ansible.builtin.shell:
+        cmd: systemctl stop man-db.timer man-db.service
+      changed_when: false
+      failed_when: false
+      become: true
+
     - name: 阻止 dpkg 维护脚本在安装期间自动启动 RabbitMQ
       ansible.builtin.copy:
         dest: /usr/sbin/policy-rc.d
@@ -61,11 +138,46 @@
       changed_when: false
       become: true
 
+    - name: 等待 dpkg 前端锁释放
+      ansible.builtin.shell:
+        cmd: >-
+          if command -v fuser >/dev/null 2>&1 &&
+             ! timeout 2s fuser -s /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+            exit 0
+          elif command -v fuser >/dev/null 2>&1 &&
+               timeout 2s fuser -s /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+            exit 1
+          fi
+      register: dpkg_lock_wait
+      changed_when: false
+      until: dpkg_lock_wait.rc == 0
+      retries: 60
+      delay: 5
+      become: true
+
     - name: 通过本地包缓存安装 RabbitMQ（不下载、不删除）
       block:
         - name: 执行离线 dpkg 安装
           ansible.builtin.shell:
-            cmd: dpkg -i /tmp/rabbitmq/*.deb
+            cmd: |
+              for attempt in $(seq 1 60); do
+                if command -v fuser >/dev/null 2>&1 &&
+                   fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+                  sleep 5
+                  continue
+                fi
+                dpkg -i /tmp/rabbitmq/*.deb
+                rc=$?
+                if [ "$rc" -eq 0 ]; then
+                  exit 0
+                fi
+                if [ "$rc" -ne 2 ] ||
+                   ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+                  exit "$rc"
+                fi
+                sleep 5
+              done
+              exit 2
           register: dpkg_result
           changed_when: "'Setting up rabbitmq-server' in dpkg_result.stdout"
           become: true
@@ -75,11 +187,49 @@
           changed_when: false
           become: true
 
-        - name: 删除安装期间的临时启动策略
+        - name: 恢复安装前的 policy-rc.d 状态
           ansible.builtin.file:
             path: /usr/sbin/policy-rc.d
             state: absent
+          when: not policy_rc_d_original.stat.exists
           become: true
+
+        - name: 恢复安装前已有的 policy-rc.d
+          ansible.builtin.copy:
+            dest: /usr/sbin/policy-rc.d
+            content: "{{ policy_rc_d_original_content.content | b64decode }}"
+            owner: "{{ policy_rc_d_original.stat.pw_name }}"
+            group: "{{ policy_rc_d_original.stat.gr_name }}"
+            mode: "{{ policy_rc_d_original.stat.mode }}"
+          when: policy_rc_d_original.stat.exists
+          become: true
+
+        - name: 恢复 man-db service 状态
+          ansible.builtin.shell:
+            cmd: >-
+              if printf '%s\n' '{{ man_db_original_status.stdout }}' |
+                 grep -q '^service_active=active$'; then
+                systemctl start man-db.service;
+              fi
+          changed_when: false
+          failed_when: false
+          become: true
+
+        - name: 恢复 man-db timer 状态
+          ansible.builtin.shell:
+            cmd: >-
+              if printf '%s\n' '{{ man_db_original_status.stdout }}' |
+                 grep -q '^timer_enabled=enabled$'; then
+                systemctl enable man-db.timer;
+              fi
+              if printf '%s\n' '{{ man_db_original_status.stdout }}' |
+                 grep -q '^timer_active=active$'; then
+                systemctl start man-db.timer;
+              fi
+          changed_when: false
+          failed_when: false
+          become: true
+          no_log: true
 
     - name: 显示 dpkg 安装结果
       ansible.builtin.debug:

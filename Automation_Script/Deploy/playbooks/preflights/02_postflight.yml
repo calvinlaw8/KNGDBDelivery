@@ -1,0 +1,24 @@
+---
+# ============================================================
+# 02_postflight.yml  —  部署完成后的系统包终检
+# ============================================================
+
+- name: 部署后终检 - dpkg 数据库状态
+  hosts: db_all
+  gather_facts: false
+  tags: postflight
+
+  tasks:
+    - name: 检查 dpkg 数据库是否存在未完成状态
+      ansible.builtin.command: dpkg --audit
+      register: postflight_dpkg_audit
+      changed_when: false
+      become: true
+
+    - name: 断言部署后 dpkg 数据库健康
+      ansible.builtin.assert:
+        that: postflight_dpkg_audit.stdout | trim == ""
+        fail_msg: >-
+          {{ inventory_hostname }} 部署后仍存在 dpkg 未完成或损坏状态：
+          {{ postflight_dpkg_audit.stdout }}
+        success_msg: "{{ inventory_hostname }} 部署后 dpkg 审计通过"

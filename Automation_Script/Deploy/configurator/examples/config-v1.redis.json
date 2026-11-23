@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "deployment": {
+    "components": ["redis"]
+  },
+  "management": {
+    "ip": "192.0.2.10",
+    "hostname": "ansible-node"
+  },
+  "ssh": {
+    "management_user": "sysadmin",
+    "database_user": "sysadmin"
+  },
+  "components": {
+    "redis": {
+      "nodes": [
+        {"ip": "192.0.2.21", "hostname": "redis-node1", "role": "master"},
+        {"ip": "192.0.2.22", "hostname": "redis-node2", "role": "replica"},
+        {"ip": "192.0.2.23", "hostname": "redis-node3", "role": "replica"}
+      ],
+      "service": {
+        "port": 6379,
+        "sentinel_port": 26379,
+        "sentinel_master_name": "mymaster"
+      }
+    }
+  },
+  "secrets": {
+    "management_ssh_password": "EXAMPLE_ONLY",
+    "database_ssh_password": "EXAMPLE_ONLY",
+    "redis_password": "EXAMPLE_ONLY"
+  }
+}

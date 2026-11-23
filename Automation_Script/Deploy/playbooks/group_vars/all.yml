@@ -11,7 +11,7 @@ rabbitmq_pkg_dir: "{{ staging_dir }}/rabbitmq"
 mongodb_pkg_dir:  "{{ staging_dir }}/mongodb"
 mysql_pkg_dir:    "{{ staging_dir }}/mysql"
 
-# 交付五只支持此操作系统与架构基线；不满足时前置检查必须终止部署。
+# eCopilot 数据库高可用部署只支持此操作系统与架构基线；不满足时前置检查必须终止部署。
 required_os_distribution: "Ubuntu"
 required_os_major_version: "24"
 required_architecture: "x86_64"

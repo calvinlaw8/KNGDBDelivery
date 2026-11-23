@@ -9,6 +9,8 @@
   hosts: mysql
   gather_facts: false
   tags: mysql, mysql-verify
+  environment:
+    MYSQL_PWD: "{{ mysql_root_password }}"
 
   tasks:
     - name: 检查 mysqld 服务状态
@@ -37,6 +39,8 @@
   hosts: mysql
   gather_facts: false
   tags: mysql, mysql-verify
+  environment:
+    MYSQL_PWD: "{{ mysql_root_password }}"
 
   tasks:
     - name: 验证 Replica IO Thread Running = Yes
@@ -44,9 +48,10 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -e "SHOW REPLICA STATUS\G"
           | grep "Replica_IO_Running" | awk '{print $2}'
       register: io_running
@@ -60,9 +65,10 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -e "SHOW REPLICA STATUS\G"
           | grep "Replica_SQL_Running:" | head -1 | awk '{print $2}'
       register: sql_running
@@ -70,6 +76,38 @@
       failed_when: sql_running.stdout | trim != "Yes"
       become: true
       no_log: true
+
+    - name: 严格验证 Replica 错误与复制延迟
+      when: inventory_hostname != mysql_primary_ip
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }} --protocol=TCP --host=127.0.0.1
+          --port={{ mysql_port }} -u root
+          -e "SHOW REPLICA STATUS\G" |
+          awk -v threshold={{ mysql_replication_max_delay_seconds }} '
+          function value(line) { sub(/^[^:]*:[[:space:]]*/, "", line); gsub(/[[:space:]\r]/, "", line); return line }
+          /^[[:space:]]*Replica_IO_Running:/{io=value($0)}
+          /^[[:space:]]*Replica_SQL_Running:/{sql=value($0)}
+          /^[[:space:]]*Last_IO_Error:/{ioerr=value($0)}
+          /^[[:space:]]*Last_SQL_Error:/{sqlerr=value($0)}
+          /^[[:space:]]*Seconds_Behind_Source:/{delay=value($0)}
+          END {
+            if (io == "Yes" && sql == "Yes" && delay ~ /^[0-9]+$/ &&
+                delay + 0 <= threshold && (ioerr == "" || ioerr == "NULL") &&
+                (sqlerr == "" || sqlerr == "NULL")) print "OK";
+            else exit 1;
+          }'
+      register: replica_health
+      changed_when: false
+      failed_when: >-
+        replica_health.rc != 0 or replica_health.stdout | trim != "OK"
+      become: true
+      no_log: true
+
+    - name: 输出 Replica 健康摘要
+      when: inventory_hostname != mysql_primary_ip
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}：复制线程、错误字段和延迟断言通过"
 
     - name: 显示 Replica 复制线程状态
       when: inventory_hostname != mysql_primary_ip
@@ -84,15 +122,16 @@
       ansible.builtin.shell:
         cmd: >
           {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -e "SHOW REPLICA STATUS\G"
           | grep -E "Executed_Gtid_Set|Source_Host|Seconds_Behind_Source"
       register: gtid_status
       changed_when: false
       become: true
-      no_log: false
+      no_log: true
 
     - name: 输出 GTID 状态详情
       when: inventory_hostname != mysql_primary_ip
@@ -100,43 +139,73 @@
         msg: "{{ gtid_status.stdout_lines }}"
 
 
-- name: MySQL VIP 可达性验证（从 Ansible-01 验证）
+- name: MySQL VIP 网络可达性验证（从 Ansible-01 验证）
   hosts: localhost
+  connection: local
   gather_facts: false
   tags: mysql, mysql-verify
-  vars_files:
-    - ../../group_vars/mysql.yml
 
   tasks:
     - name: Ping VIP（验证 VIP 活跃）
-      ansible.builtin.command: "ping -c 3 {{ mysql_vip }}"
+      ansible.builtin.command: "ping -c 3 {{ hostvars[groups['mysql'][0]].mysql_vip }}"
       register: vip_ping
       changed_when: false
       failed_when: vip_ping.rc != 0
 
     - name: 输出 Ping 结果
       ansible.builtin.debug:
-        msg: "VIP {{ mysql_vip }} 可达 ✅（{{ vip_ping.stdout_lines[-1] }}）"
+        msg: "VIP {{ hostvars[groups['mysql'][0]].mysql_vip }} 可达 ✅（{{ vip_ping.stdout_lines[-1] }}）"
+
+    - name: 从管理节点验证 VIP TCP 端口
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[groups['mysql'][0]].mysql_vip }}"
+        port: "{{ hostvars[groups['mysql'][0]].mysql_port }}"
+        timeout: 5
+        state: started
+
+
+- name: MySQL VIP SQL 验证（从 Primary 节点经 VIP 执行）
+  hosts: mysql
+  gather_facts: false
+  tags: mysql, mysql-verify
+  environment:
+    MYSQL_PWD: "{{ mysql_vip_verify_password }}"
+
+  tasks:
+    - name: 通过 VIP 执行 TCP SQL 并确认 Primary 角色
+      when: inventory_hostname == mysql_primary_ip
+      ansible.builtin.shell:
+        cmd: >
+          {{ mysql_client_bin }} --protocol=TCP --host={{ mysql_vip }}
+          --port={{ mysql_port }} -u {{ mysql_vip_verify_user }}
+          -NBe "SELECT 1, @@global.read_only;"
+      register: vip_sql
+      changed_when: false
+      failed_when: vip_sql.rc != 0 or vip_sql.stdout | trim != "1\t0"
+      become: true
+      no_log: true
 
 
 - name: MySQL 验证通过摘要（Primary 节点）
   hosts: mysql
   gather_facts: false
   tags: mysql, mysql-verify
+  environment:
+    MYSQL_PWD: "{{ mysql_root_password }}"
 
   tasks:
     - name: 显示 Primary GTID 状态
       ansible.builtin.shell:
         cmd: >
-          {{ mysql_client_bin }}
-          --socket=/tmp/mysql.sock
+          {{ mysql_client_bin }} --protocol=TCP
+          --host=127.0.0.1
+          --port={{ mysql_port }}
           -u root
-          -p"{{ mysql_root_password }}"
           -NBe "SELECT @@gtid_executed;"
       register: primary_gtid
       changed_when: false
       become: true
-      no_log: false
+      no_log: true
       when: inventory_hostname == mysql_primary_ip
       run_once: true
 

@@ -12,7 +12,9 @@
 
 - name: RabbitMQ 配置 - Erlang Cookie 和服务启动
   hosts: rabbitmq
+  serial: 1
   gather_facts: false
+  any_errors_fatal: true
   tags: rabbitmq, rabbitmq-cookie
 
   tasks:
@@ -25,6 +27,107 @@
         mode: "0750"
       become: true
 
+    - name: 探测种子节点现有 RabbitMQ 集群状态
+      ansible.builtin.command: rabbitmqctl cluster_status
+      register: rabbitmq_seed_cluster_status
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname == rabbitmq_seed_node_ip
+      become: true
+
+    - name: 探测种子节点持久化集群身份
+      ansible.builtin.shell:
+        cmd: "find /var/lib/rabbitmq/mnesia -maxdepth 1 -mindepth 1 -type d -name 'rabbit@*' -print -quit"
+      register: rabbitmq_seed_persisted_node
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname == rabbitmq_seed_node_ip
+      become: true
+
+    - name: 验证种子节点 RabbitMQ 集群健康度
+      ansible.builtin.shell:
+        cmd: |
+          rabbitmq-diagnostics -q check_running
+          cluster_status=$(rabbitmqctl cluster_status)
+          {% for cluster_hostname in rabbitmq_cluster_hostnames %}
+          printf '%s\n' "$cluster_status" | grep -Fq 'rabbit@{{ cluster_hostname }}' || exit 1
+          {% endfor %}
+      register: rabbitmq_seed_cluster_health
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname == rabbitmq_seed_node_ip
+      become: true
+
+    - name: 读取安装前 RabbitMQ 健康复用判定
+      ansible.builtin.command: cat /var/lib/rabbitmq/.ecopilot-existing-cluster-health
+      register: rabbitmq_persisted_cluster_health
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname == rabbitmq_seed_node_ip
+      become: true
+
+    - name: 标记是否已有健康可复用的 RabbitMQ 集群
+      ansible.builtin.set_fact:
+        rabbitmq_existing_cluster: >-
+          {{ not (rabbitmq_rebuild_cluster | bool) and
+             ((rabbitmq_persisted_cluster_health.rc == 0 and
+               rabbitmq_persisted_cluster_health.stdout | trim == 'true') or
+              (rabbitmq_seed_cluster_health.rc == 0 and
+               rabbitmq_seed_cluster_status.rc == 0)) }}
+      when: inventory_hostname == rabbitmq_seed_node_ip
+
+    - name: 采集显式重建前 RabbitMQ 只读状态快照
+      ansible.builtin.shell:
+        cmd: |
+          printf '%s\n' '--- systemd ---'
+          timeout 10s systemctl is-active rabbitmq-server.service || true
+          printf '%s\n' '--- erlang node ---'
+          timeout 10s epmd -names || true
+          printf '%s\n' '--- rabbit app ---'
+          timeout 10s rabbitmq-diagnostics -q ping || true
+          printf '%s\n' '--- cluster status ---'
+          timeout 10s rabbitmqctl cluster_status || true
+          printf '%s\n' '--- mnesia directory ---'
+          stat -c 'path=%n mode=%a owner=%U group=%G type=%F' /var/lib/rabbitmq/mnesia 2>&1 || true
+          printf '%s\n' '--- recent journal ---'
+          journalctl -u rabbitmq-server.service -n 20 --no-pager 2>&1 || true
+      register: rabbitmq_rebuild_state_snapshot
+      changed_when: false
+      when: rabbitmq_rebuild_cluster | bool
+      become: true
+
+    - name: 输出显式重建前 RabbitMQ 只读状态快照
+      ansible.builtin.debug:
+        msg: "{{ rabbitmq_rebuild_state_snapshot.stdout }}"
+      when: rabbitmq_rebuild_cluster | bool
+
+    - name: 初始化 RabbitMQ 显式重建阶段 checkpoint
+      ansible.builtin.set_fact:
+        rabbitmq_rebuild_stage: preflight_snapshot
+      when: rabbitmq_rebuild_cluster | bool
+
+    - name: 停止 RabbitMQ 服务以建立受控集群启动顺序
+      ansible.builtin.command: systemctl stop --no-block rabbitmq-server.service
+      changed_when: false
+      failed_when: false
+      when: >-
+        rabbitmq_rebuild_cluster | bool or
+        not (hostvars[rabbitmq_seed_node_ip].rabbitmq_existing_cluster | default(false) | bool)
+      become: true
+
+    - name: 等待 RabbitMQ 服务停止
+      ansible.builtin.command: systemctl is-active rabbitmq-server.service
+      register: stopped_rabbitmq_status
+      changed_when: false
+      failed_when: false
+      until: stopped_rabbitmq_status.stdout in ["inactive", "failed"]
+      retries: 30
+      delay: 2
+      when: >-
+        rabbitmq_rebuild_cluster | bool or
+        not (hostvars[rabbitmq_seed_node_ip].rabbitmq_existing_cluster | default(false) | bool)
+      become: true
+
     - name: 写入统一 Erlang Cookie（3 节点必须完全一致）
       ansible.builtin.copy:
         dest: /var/lib/rabbitmq/.erlang.cookie
@@ -34,49 +137,289 @@
         mode: "0400"
       become: true
       no_log: true
-      notify: restart rabbitmq-server
 
-    - name: 种子节点 - 启动 rabbitmq-server 并设为开机自启
-      ansible.builtin.systemd:
-        name: rabbitmq-server
-        state: started
-        enabled: true
-        daemon_reload: true
-      when: inventory_hostname == rabbitmq_seed_node_ip
-      become: true
-
-    - name: 等待种子节点 RabbitMQ 完全启动（15 秒）
-      ansible.builtin.wait_for:
-        timeout: 15
-      delegate_to: localhost
-      when: inventory_hostname == rabbitmq_seed_node_ip
-
-    - name: 验证种子节点 rabbitmq-server 状态
-      ansible.builtin.command: systemctl is-active rabbitmq-server
-      register: rmq_active
+    - name: 获取 RabbitMQ 状态备份时间戳（仅显式重建时执行）
+      ansible.builtin.command: date -u +%Y%m%dT%H%M%SZ
+      register: rabbitmq_backup_timestamp
       changed_when: false
-      failed_when: rmq_active.stdout != "active"
-      when: inventory_hostname == rabbitmq_seed_node_ip
+      when: rabbitmq_rebuild_cluster | bool
       become: true
 
-  handlers:
-    - name: restart rabbitmq-server
-      ansible.builtin.systemd:
-        name: rabbitmq-server
-        state: restarted
-        daemon_reload: true
+    - name: 备份 RabbitMQ 持久化状态（仅显式重建时执行）
+      ansible.builtin.archive:
+        path: /var/lib/rabbitmq/mnesia
+        dest: "/var/lib/rabbitmq/mnesia-backup-{{ rabbitmq_backup_timestamp.stdout }}.tar.gz"
+        format: gz
+        owner: rabbitmq
+        group: rabbitmq
+        mode: "0600"
+      when: rabbitmq_rebuild_cluster | bool
       become: true
 
+    - name: 校验 RabbitMQ 状态备份文件（仅显式重建时执行）
+      ansible.builtin.stat:
+        path: "/var/lib/rabbitmq/mnesia-backup-{{ rabbitmq_backup_timestamp.stdout }}.tar.gz"
+      register: rabbitmq_backup_file
+      failed_when: >-
+        not rabbitmq_backup_file.stat.exists or
+        not rabbitmq_backup_file.stat.isreg or
+        rabbitmq_backup_file.stat.mode != '0600'
+      when: rabbitmq_rebuild_cluster | bool
+      become: true
+
+    - name: 校验 RabbitMQ 状态备份内容（仅显式重建时执行）
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -tzf
+          - "/var/lib/rabbitmq/mnesia-backup-{{ rabbitmq_backup_timestamp.stdout }}.tar.gz"
+      register: rabbitmq_backup_archive_test
+      changed_when: false
+      failed_when: rabbitmq_backup_archive_test.rc != 0
+      when: rabbitmq_rebuild_cluster | bool
+      become: true
+
+    - name: 记录 RabbitMQ 备份校验完成 checkpoint
+      ansible.builtin.set_fact:
+        rabbitmq_rebuild_stage: backup_verified
+      when: rabbitmq_rebuild_cluster | bool
+
+- name: RabbitMQ 显式重建 - 隔离全部节点旧状态
+  hosts: rabbitmq
+  serial: 1
+  gather_facts: false
+  any_errors_fatal: true
+  tags: rabbitmq, rabbitmq-rebuild
+
+  tasks:
+    - name: 确认 RabbitMQ 服务已停止后再隔离状态
+      ansible.builtin.command: systemctl is-active rabbitmq-server.service
+      register: rabbitmq_isolation_service_status
+      changed_when: false
+      failed_when: rabbitmq_isolation_service_status.stdout not in ["inactive", "failed"]
+      when: rabbitmq_rebuild_cluster | bool
+      become: true
+
+    - name: 获取 RabbitMQ 旧状态隔离目录时间戳
+      ansible.builtin.command: date -u +%Y%m%dT%H%M%SZ
+      register: rabbitmq_isolation_timestamp
+      changed_when: false
+      when: rabbitmq_rebuild_cluster | bool
+      become: true
+
+    - name: 检查 RabbitMQ 旧状态目录为普通目录且隔离目标不存在
+      ansible.builtin.shell:
+        cmd: |
+          test -d /var/lib/rabbitmq/mnesia
+          test ! -L /var/lib/rabbitmq/mnesia
+          test ! -e "/var/lib/rabbitmq/mnesia-isolated-{{ rabbitmq_isolation_timestamp.stdout }}"
+      changed_when: false
+      when: rabbitmq_rebuild_cluster | bool
+      become: true
+
+    - name: 原子隔离 RabbitMQ 旧 Mnesia 状态
+      ansible.builtin.command:
+        argv:
+          - mv
+          - /var/lib/rabbitmq/mnesia
+          - "/var/lib/rabbitmq/mnesia-isolated-{{ rabbitmq_isolation_timestamp.stdout }}"
+      when: rabbitmq_rebuild_cluster | bool
+      become: true
+
+    - name: 创建干净 RabbitMQ Mnesia 目录
+      ansible.builtin.file:
+        path: /var/lib/rabbitmq/mnesia
+        state: directory
+        owner: rabbitmq
+        group: rabbitmq
+        mode: "0750"
+      when: rabbitmq_rebuild_cluster | bool
+      become: true
+
+    - name: 记录 RabbitMQ 旧状态隔离 checkpoint
+      ansible.builtin.set_fact:
+        rabbitmq_rebuild_stage: state_isolated
+      when: rabbitmq_rebuild_cluster | bool
+
+- name: RabbitMQ 健康复用 - 并行恢复全部节点
+  hosts: rabbitmq
+  gather_facts: false
+  any_errors_fatal: true
+  tags: rabbitmq, rabbitmq-reuse
+
+  tasks:
+    - name: 并行恢复已有 RabbitMQ 集群的全部节点服务
+      ansible.builtin.shell:
+        cmd: >-
+          systemctl enable rabbitmq-server &&
+          systemctl reset-failed rabbitmq-server &&
+          systemctl start --no-block rabbitmq-server
+      changed_when: true
+      when:
+        - not (rabbitmq_rebuild_cluster | bool)
+        - hostvars[rabbitmq_seed_node_ip].rabbitmq_existing_cluster | default(false) | bool
+      become: true
+
+    - name: 等待健康复用节点 RabbitMQ App 可用
+      ansible.builtin.command: rabbitmq-diagnostics -q check_running
+      register: rabbitmq_reuse_app
+      changed_when: false
+      until: rabbitmq_reuse_app.rc == 0
+      retries: 72
+      delay: 5
+      when:
+        - not (rabbitmq_rebuild_cluster | bool)
+        - hostvars[rabbitmq_seed_node_ip].rabbitmq_existing_cluster | default(false) | bool
+      become: true
+
+- name: RabbitMQ 健康复用 - 验证完整集群状态
+  hosts: rabbitmq
+  gather_facts: false
+  any_errors_fatal: true
+  tags: rabbitmq, rabbitmq-reuse
+
+  tasks:
+    - name: 种子节点确认健康复用集群成员完整
+      ansible.builtin.shell:
+        cmd: |
+          cluster_status=$(rabbitmqctl cluster_status)
+          {% for cluster_hostname in rabbitmq_cluster_hostnames %}
+          printf '%s\n' "$cluster_status" | grep -Fq 'rabbit@{{ cluster_hostname }}' || exit 1
+          {% endfor %}
+      register: rabbitmq_reuse_cluster_health
+      changed_when: false
+      until: rabbitmq_reuse_cluster_health.rc == 0
+      retries: 36
+      delay: 5
+      when:
+        - inventory_hostname == rabbitmq_seed_node_ip
+        - not (rabbitmq_rebuild_cluster | bool)
+        - hostvars[rabbitmq_seed_node_ip].rabbitmq_existing_cluster | default(false) | bool
+      become: true
+
+
+- name: RabbitMQ 配置 - 种子节点启动
+  hosts: rabbitmq
+  gather_facts: false
+  any_errors_fatal: true
+  tags: rabbitmq, rabbitmq-seed
+
+  tasks:
+    - name: 启动种子节点 rabbitmq-server 并设为开机自启
+      ansible.builtin.shell:
+        cmd: >-
+          systemctl enable rabbitmq-server &&
+          systemctl reset-failed rabbitmq-server &&
+          systemctl start --no-block rabbitmq-server
+      changed_when: true
+      when:
+        - inventory_hostname == rabbitmq_seed_node_ip
+        - rabbitmq_rebuild_cluster | bool or not (hostvars[rabbitmq_seed_node_ip].rabbitmq_existing_cluster | default(false) | bool)
+      become: true
+
+    - name: 等待并验证种子节点 RabbitMQ 完全启动
+      block:
+        - name: 连续两次确认种子节点 RabbitMQ 稳定可用
+          ansible.builtin.shell:
+            cmd: |
+              for sample in 1 2; do
+                active=$(timeout 10s systemctl is-active rabbitmq-server 2>&1)
+                active_rc=$?
+                if [ "$active_rc" -ne 0 ] || [ "$active" != "active" ]; then
+                  printf 'RMQ_READINESS_CATEGORY=systemd_not_active state=%s rc=%s\n' "$active" "$active_rc"
+                  exit 1
+                fi
+
+                app_check=$(timeout 10s rabbitmq-diagnostics -q check_running 2>&1)
+                app_rc=$?
+                if [ "$app_rc" -ne 0 ]; then
+                  if printf '%s\n' "$app_check" | grep -Eiq 'timeout_waiting_for_leader|timed out.*leader'; then
+                    printf 'RMQ_READINESS_CATEGORY=khepri_leader_timeout rc=%s\n' "$app_rc"
+                  else
+                    printf 'RMQ_READINESS_CATEGORY=rabbit_app_not_running rc=%s\n' "$app_rc"
+                  fi
+                  exit 1
+                fi
+
+                ping_check=$(timeout 10s rabbitmq-diagnostics -q ping 2>&1)
+                ping_rc=$?
+                if [ "$ping_rc" -ne 0 ]; then
+                  printf 'RMQ_READINESS_CATEGORY=erlang_node_unreachable rc=%s\n' "$ping_rc"
+                  exit 1
+                fi
+
+                [ "$sample" -eq 2 ] || sleep 2
+              done
+              printf '%s\n' 'RMQ_READINESS_CATEGORY=stable_two_samples'
+          register: rmq_seed_readiness
+          changed_when: false
+          failed_when: false
+          until: rmq_seed_readiness.rc == 0
+          retries: 72
+          delay: 5
+
+        - name: 种子节点稳定性探针失败时终止
+          ansible.builtin.fail:
+            msg: >-
+              RabbitMQ 种子节点未通过连续两次稳定性确认；
+              分类={{ rmq_seed_readiness.stdout | default('未返回分类') | trim }}；
+              stderr={{ rmq_seed_readiness.stderr | default('') | trim }}
+          when: rmq_seed_readiness.rc != 0
+      rescue:
+        - name: 采集种子节点启动失败后的只读诊断
+          ansible.builtin.shell:
+            cmd: |
+              printf '%s\n' 'RabbitMQ seed startup diagnostics:'
+              systemctl show rabbitmq-server -p LoadState -p ActiveState -p SubState -p Result -p ExecMainStatus -p UnitFileState
+              printf '%s\n' '--- systemctl status ---'
+              systemctl --no-pager --full status rabbitmq-server || true
+              printf '%s\n' '--- journal ---'
+              journalctl -u rabbitmq-server -n 80 --no-pager -o cat || true
+              printf '%s\n' '--- rabbitmq diagnostics ---'
+              rabbitmq-diagnostics -q ping || true
+          register: rmq_seed_startup_diagnostics
+          changed_when: false
+          failed_when: false
+
+        - name: 标记 Khepri leader 等待超时
+          ansible.builtin.debug:
+            msg: "RabbitMQ readiness category: khepri_leader_timeout"
+          when: >-
+            'khepri_leader_timeout' in
+            (rmq_seed_readiness.stdout | default(''))
+
+        - name: 输出种子节点启动失败诊断
+          ansible.builtin.debug:
+            msg: "{{ rmq_seed_startup_diagnostics.stdout_lines | default([]) }}"
+
+        - name: 明确终止 RabbitMQ 种子节点启动
+          ansible.builtin.fail:
+            msg: "RabbitMQ 种子节点未能启动；上方已输出 systemd、journal 和 RabbitMQ 只读诊断，禁止自动恢复。"
+      when:
+        - inventory_hostname == rabbitmq_seed_node_ip
+        - rabbitmq_rebuild_cluster | bool or not (hostvars[rabbitmq_seed_node_ip].rabbitmq_existing_cluster | default(false) | bool)
+      become: true
+
+    - name: 记录 RabbitMQ 种子节点启动 checkpoint
+      ansible.builtin.set_fact:
+        rabbitmq_rebuild_stage: seed_started
+      when:
+        - rabbitmq_rebuild_cluster | bool
+        - inventory_hostname == rabbitmq_seed_node_ip
 
 - name: RabbitMQ 集群 - 非种子节点加入集群
   hosts: rabbitmq
   gather_facts: false
   serial: 1
+  any_errors_fatal: true
   tags: rabbitmq, rabbitmq-cluster
 
   tasks:
     - name: 非种子节点 - 检查并加入集群
-      when: inventory_hostname != rabbitmq_seed_node_ip
+      when: >-
+        inventory_hostname != rabbitmq_seed_node_ip and
+        (rabbitmq_rebuild_cluster | bool or
+         not (hostvars[rabbitmq_seed_node_ip].rabbitmq_existing_cluster | default(false) | bool))
       block:
         - name: 启动非种子节点 RabbitMQ 服务
           ansible.builtin.systemd:
@@ -98,37 +441,100 @@
         - name: 加入集群（若尚未加入）
           when: cluster_check.stdout | int == 0
           block:
-            - name: 停止 App
-              ansible.builtin.command: rabbitmqctl stop_app
+            - name: 停止 App 后再加入集群
+              ansible.builtin.command: timeout 30s rabbitmqctl stop_app
+              register: rabbitmq_stop_app_result
+              changed_when: rabbitmq_stop_app_result.rc == 0
+              failed_when: false
+              when: rabbitmq_rebuild_cluster | bool or not (rabbitmq_existing_cluster | default(false) | bool)
               become: true
 
-            - name: 重置节点
+            - name: 终止失败的 RabbitMQ App 停止并分类原因
+              ansible.builtin.fail:
+                msg: >-
+                  RabbitMQ stop_app
+                  {{ '超时（30 秒）' if rabbitmq_stop_app_result.rc == 124 else '失败' }}；
+                  rc={{ rabbitmq_stop_app_result.rc }}；
+                  stderr={{ rabbitmq_stop_app_result.stderr | default('') | trim }}
+              when: rabbitmq_stop_app_result.rc != 0
+
+            - name: 重置节点（普通加入路径）
               ansible.builtin.command: rabbitmqctl reset
+              when: not (rabbitmq_rebuild_cluster | bool)
+              become: true
+
+            - name: 等待种子节点 Erlang RPC 可达
+              ansible.builtin.command: >-
+                rabbitmq-diagnostics -n rabbit@{{ rabbitmq_seed_hostname }} -q ping
+              register: seed_rpc_ping
+              changed_when: false
+              until: seed_rpc_ping.rc == 0
+              retries: 36
+              delay: 5
               become: true
 
             - name: 加入种子节点
-              ansible.builtin.command: >
-                rabbitmqctl join_cluster rabbit@{{ rabbitmq_seed_hostname }}
+              ansible.builtin.command: >-
+                timeout 30s rabbitmqctl join_cluster rabbit@{{ rabbitmq_seed_hostname }}
+              register: rabbitmq_join_cluster_result
+              changed_when: rabbitmq_join_cluster_result.rc == 0
+              failed_when: false
               become: true
 
+            - name: 终止失败的 RabbitMQ 集群加入并分类原因
+              ansible.builtin.fail:
+                msg: >-
+                  RabbitMQ join_cluster
+                  {{ '超时（30 秒）' if rabbitmq_join_cluster_result.rc == 124 else '失败' }}；
+                  rc={{ rabbitmq_join_cluster_result.rc }}；
+                  stderr={{ rabbitmq_join_cluster_result.stderr | default('') | trim }}
+              when: rabbitmq_join_cluster_result.rc != 0
+
             - name: 启动 App
-              ansible.builtin.command: rabbitmqctl start_app
+              ansible.builtin.command: timeout 30s rabbitmqctl start_app
+              register: rabbitmq_start_app_result
+              changed_when: rabbitmq_start_app_result.rc == 0
+              failed_when: false
               become: true
+
+            - name: 终止失败的 RabbitMQ App 启动并分类原因
+              ansible.builtin.fail:
+                msg: >-
+                  RabbitMQ start_app
+                  {{ '超时（30 秒）' if rabbitmq_start_app_result.rc == 124 else '失败' }}；
+                  rc={{ rabbitmq_start_app_result.rc }}；
+                  stderr={{ rabbitmq_start_app_result.stderr | default('') | trim }}
+              when: rabbitmq_start_app_result.rc != 0
 
         - name: 验证集群成员数（应 >= 2）
           ansible.builtin.shell:
             cmd: >
               rabbitmqctl cluster_status 2>/dev/null |
-              grep -c "{{ rabbitmq_node_prefix }}" || true
+              sed -n '/Disk Nodes/,/Running Nodes/p' |
+              grep '^rabbit@' |
+              sort | paste -sd ',' -
           register: cluster_members
           changed_when: false
-          failed_when: cluster_members.stdout | int < 2
+          vars:
+            current_cluster_node: "rabbit@{{ inventory_hostname }}"
+            seed_cluster_node: "rabbit@{{ rabbitmq_seed_hostname }}"
+          until:
+            - cluster_members.stdout | trim | split(',') | length >= 2
+            - current_cluster_node in (cluster_members.stdout | trim | split(','))
+            - seed_cluster_node in (cluster_members.stdout | trim | split(','))
+          retries: 12
+          delay: 5
+          failed_when:
+            - cluster_members.stdout | trim | split(',') | length < 2
+            - current_cluster_node not in (cluster_members.stdout | trim | split(','))
+            - seed_cluster_node not in (cluster_members.stdout | trim | split(','))
           become: true
 
 
 - name: RabbitMQ 集群 - Management Plugin 和账号管理
   hosts: rabbitmq
   gather_facts: false
+  any_errors_fatal: true
   tags: rabbitmq, rabbitmq-admin
 
   tasks:
@@ -169,7 +575,9 @@
           block:
             - name: 添加 admin 用户
               ansible.builtin.command: >
-                rabbitmqctl add_user {{ rabbitmq_admin_user }} {{ rabbitmq_admin_password }}
+                rabbitmqctl add_user {{ rabbitmq_admin_user }}
+              args:
+                stdin: "{{ rabbitmq_admin_password }}\n"
               become: true
               no_log: true
 

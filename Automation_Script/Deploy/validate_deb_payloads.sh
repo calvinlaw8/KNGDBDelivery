@@ -4,8 +4,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DELIVERY_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PACKAGE_ROOT="${PACKAGE_ROOT:-${DELIVERY_ROOT}/离线安装包}"
+COMPONENTS=(redis rabbitmq mongodb mysql)
 
 failures=0
+
+if [[ "${1:-}" == "--components" ]]; then
+  [[ -n "${2:-}" ]] || { echo 'FAIL: --components 缺少组件列表' >&2; exit 2; }
+  COMPONENTS=()
+  requested_components="${2//,/ }"
+  for component in ${requested_components}; do
+    case "${component}" in
+      redis|rabbitmq|mongodb|mysql) COMPONENTS+=("${component}") ;;
+      *) echo "FAIL: 未知组件：${component}" >&2; exit 2 ;;
+    esac
+  done
+  [[ "${#COMPONENTS[@]}" -gt 0 ]] || { echo 'FAIL: --components 缺少组件列表' >&2; exit 2; }
+fi
 
 target_package() {
   case "$1" in
@@ -53,7 +67,7 @@ command -v dpkg-deb >/dev/null 2>&1 || {
   exit 2
 }
 
-for component in redis rabbitmq mongodb mysql; do
+for component in "${COMPONENTS[@]}"; do
   expected_package=$(target_package "${component}")
   expected_version=$(target_version "${component}")
   component_dir="${PACKAGE_ROOT}/${component}"
@@ -75,6 +89,10 @@ for component in redis rabbitmq mongodb mysql; do
   while IFS= read -r -d '' non_deb_file; do
     fail "${component}: 存在非 .deb 文件：${non_deb_file}"
   done < <(find "${component_dir}" -maxdepth 1 -type f ! -name '*.deb' -print0)
+
+  while IFS= read -r -d '' nested_dir; do
+    fail "${component}: 存在嵌套目录：${nested_dir}"
+  done < <(find "${component_dir}" -mindepth 1 -type d -print0)
 
   package_found=0
   for package_file in "${deb_files[@]}"; do

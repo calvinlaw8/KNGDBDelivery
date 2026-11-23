@@ -54,10 +54,10 @@
 
     - name: 验证 MySQL 版本
       ansible.builtin.command: mysql --version
-      register: mysql_version
+      register: mysql_version_result
       changed_when: false
       become: true
 
     - name: 显示版本
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }}: {{ mysql_version.stdout }}"
+        msg: "{{ inventory_hostname }}: {{ mysql_version_result.stdout }}"

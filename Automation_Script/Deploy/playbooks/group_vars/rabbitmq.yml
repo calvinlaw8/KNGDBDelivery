@@ -11,6 +11,10 @@ erlang_version: "1:27.3.4.16-1"
 
 # 节点名称前缀（用于集群状态 grep 匹配）
 rabbitmq_node_prefix: "CHANGE_ME"
+rabbitmq_cluster_hostnames: []
+
+# 仅首次部署且明确确认无须保留 RabbitMQ 数据时开启；默认禁止破坏性重建
+rabbitmq_rebuild_cluster: false
 
 # Erlang Cookie（3 节点必须完全一致）
 erlang_cookie: "CHANGE_ME"

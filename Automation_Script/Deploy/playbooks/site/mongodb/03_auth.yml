@@ -60,40 +60,23 @@
       run_once: true
 
 
-- name: MongoDB 认证 - 生成 keyFile（Ansible 控制节点）
-  hosts: localhost
-  gather_facts: false
-  become: false
-  tags: mongodb, mongodb-keyfile
-
-  tasks:
-    - name: 创建临时 keyFile 目录
-      ansible.builtin.file:
-        path: /tmp/mongodb_auth
-        state: directory
-        mode: "0700"
-
-    - name: 检查 keyFile 是否已生成
-      ansible.builtin.stat:
-        path: /tmp/mongodb_auth/mongodb.keyfile
-      register: keyfile_stat
-
-    - name: 生成 keyFile（openssl rand -base64 756）
-      ansible.builtin.shell:
-        cmd: >
-          openssl rand -base64 756 > /tmp/mongodb_auth/mongodb.keyfile
-      when: not keyfile_stat.stat.exists
-
-
-- name: MongoDB 认证 - 分发 keyFile 至各节点
+- name: MongoDB 认证 - 生成并分发 keyFile
   hosts: mongodb
   gather_facts: false
   tags: mongodb, mongodb-keyfile
 
   tasks:
+    - name: 在控制节点生成 keyFile 内容
+      ansible.builtin.set_fact:
+        mongodb_keyfile_content: "{{ lookup('ansible.builtin.pipe', 'openssl rand -base64 756') }}"
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
+      no_log: true
+
     - name: 分发 keyFile（mode=0400，owner=mongodb:mongodb）
       ansible.builtin.copy:
-        src: /tmp/mongodb_auth/mongodb.keyfile
+        content: "{{ hostvars['localhost']['mongodb_keyfile_content'] }}"
         dest: "{{ mongodb_keyfile }}"
         owner: mongodb
         group: mongodb
@@ -202,12 +185,14 @@
         cmd: >
           mongosh admin --port {{ mongodb_port }} --quiet --norc
           -u {{ mongodb_admin_user }}
-          -p {{ mongodb_admin_password }}
+          -p
           --eval "rs.status().ok"
+        stdin: "{{ mongodb_admin_password }}\n"
       register: rs_ok
       changed_when: false
       failed_when: rs_ok.stdout | trim != '1'
       become: false
+      no_log: true
       when: inventory_hostname == mongodb_primary_ip
       run_once: true
 

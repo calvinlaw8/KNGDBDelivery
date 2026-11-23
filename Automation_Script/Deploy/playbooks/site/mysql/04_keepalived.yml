@@ -6,7 +6,7 @@
 #   1. 安装 Keepalived（4 个 .deb 离线包）
 #   2. 根据每台节点 IP 写入对应的 keepalived.conf
 #      （state=MASTER/BACKUP，priority=100/90/80）
-#   3. 启动 keepalived 服务，验证 VIP 绑定至 Primary
+#   3. 启动 keepalived 服务，确保 VIP 只绑定可写 Primary
 # ============================================================
 
 - name: Keepalived 安装 - 离线 .deb 包
@@ -76,6 +76,32 @@
   tags: mysql, mysql-keepalived
 
   tasks:
+    - name: 写入 Keepalived 本地 MySQL 健康检查凭据
+      ansible.builtin.copy:
+        dest: /etc/keepalived/mysql-health.cnf
+        content: |
+          [client]
+          user=root
+          password={{ mysql_root_password }}
+          host=127.0.0.1
+          port={{ mysql_port }}
+        owner: root
+        group: root
+        mode: "0600"
+      become: true
+      no_log: true
+
+    - name: 写入可写 Primary 健康检查脚本
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/ecopilot-check-mysql-writable
+        content: |
+          #!/bin/sh
+          exec {{ mysql_client_bin }} --defaults-extra-file=/etc/keepalived/mysql-health.cnf --batch --skip-column-names --connect-timeout=2 -e "SELECT IF(@@global.read_only = 0 AND @@global.super_read_only = 0, 1, 0);" | grep -qx '1'
+        owner: root
+        group: root
+        mode: "0750"
+      become: true
+
     - name: 查询当前节点 Keepalived state
       ansible.builtin.set_fact:
         my_kp_state: >-
@@ -112,9 +138,9 @@
           }
 
           vrrp_script check_mysql {
-            script "pgrep mysqld"
+            script "/usr/local/sbin/ecopilot-check-mysql-writable"
             interval 2
-            weight   -20
+            weight   0
             fall     2
             rise     1
           }
@@ -133,7 +159,7 @@
             }
 
             virtual_ipaddress {
-              {{ mysql_vip }}/24
+              {{ mysql_vip }}/{{ mysql_vip_prefix }}
             }
 
             track_script {
@@ -186,18 +212,21 @@
       delegate_to: localhost
       run_once: true
 
-    - name: 检查 VIP 绑定（Primary 节点应持有 VIP）
-      when: inventory_hostname == mysql_primary_ip
+    - name: 检查 VIP 绑定（仅可写 Primary 节点应持有 VIP）
       ansible.builtin.shell:
         cmd: ip addr show | grep -c "{{ mysql_vip }}" || true
       register: vip_check
       changed_when: false
       become: true
 
-    - name: 断言 VIP 已绑定至 Primary
-      when: inventory_hostname == mysql_primary_ip
+    - name: 断言 VIP 仅绑定至 Primary
       ansible.builtin.assert:
         that:
-          - vip_check.stdout | int > 0
-        fail_msg: "VIP {{ mysql_vip }} 未绑定至 Primary {{ inventory_hostname }}！请检查 keepalived 日志"
-        success_msg: "VIP {{ mysql_vip }} 已成功绑定至 Primary {{ inventory_hostname }} ✅"
+          - >-
+            (vip_check.stdout | int > 0 and inventory_hostname == mysql_primary_ip)
+            or (vip_check.stdout | int == 0 and inventory_hostname != mysql_primary_ip)
+        fail_msg: >-
+          VIP {{ mysql_vip }} 绑定状态异常：{{ inventory_hostname }}={{ vip_check.stdout | trim }}；
+          预期仅 Primary {{ mysql_primary_ip }} 持有 VIP
+        success_msg: >-
+          {{ inventory_hostname }} 的 VIP 绑定状态符合预期（仅 Primary {{ mysql_primary_ip }} 持有 VIP）
