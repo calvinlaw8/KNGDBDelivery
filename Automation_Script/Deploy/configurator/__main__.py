@@ -76,6 +76,10 @@ def main(argv=None) -> int:
     reconcile_parser = subparsers.add_parser("reconcile-resources", help="merge non-sensitive remote facts with a managed-resource declaration")
     reconcile_parser.add_argument("manifest", type=Path)
     reconcile_parser.add_argument("--facts", type=Path, required=True)
+    cleanup_parser = subparsers.add_parser("cleanup-plan", help="build a non-executing cleanup plan")
+    cleanup_parser.add_argument("manifest", type=Path)
+    cleanup_parser.add_argument("--reconciliation", type=Path, required=True)
+    cleanup_parser.add_argument("--components", required=True, help="comma-separated component names")
     doctor_parser = subparsers.add_parser("doctor", help="check local Python and standard-library prerequisites")
     doctor_parser.add_argument("--format", choices=("json", "text"), default="text")
     subparsers.add_parser("workbench", help="start the loopback-only offline configuration workbench")
@@ -160,6 +164,20 @@ def main(argv=None) -> int:
             return 2
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 2 if report["blocked"] else 0
+
+    if arguments.command == "cleanup-plan":
+        try:
+            from .cleanup import build_cleanup_plan
+
+            manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+            reconciliation = json.loads(arguments.reconciliation.read_text(encoding="utf-8"))
+            components = [item.strip() for item in arguments.components.split(",") if item.strip()]
+            plan = build_cleanup_plan(manifest, reconciliation, components)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            print("cleanup plan failed: {0}".format(error), file=sys.stderr)
+            return 2
+        print(json.dumps(plan, ensure_ascii=False, sort_keys=True))
+        return 0
 
     if arguments.command in ("render", "render-wizard"):
         try:

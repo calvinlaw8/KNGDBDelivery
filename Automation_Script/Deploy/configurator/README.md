@@ -53,6 +53,17 @@ python3 -m configurator reconcile-resources \
 	--facts /受控位置/资源事实.json
 ```
 
+O-202 当前只提供不可执行的 cleanup plan，不接收 `--execute`。计划必须同时使用版本化资源清单和归属合并报告：
+
+```bash
+python3 -m configurator cleanup-plan \
+	.config/managed-resources.json \
+	--reconciliation /受控位置/资源归属.json \
+	--components redis,rabbitmq
+```
+
+计划只列出停止/禁用受控服务；配置文件、数据目录和软件包均标记为保留。存在未知归属、外部冲突、未知组件或缺失合并报告时退出码为 `2`，不得执行远端操作。
+
 正式 Bash 向导通过 NUL 分隔的标准输入调用同一渲染器，不把秘密放入命令行参数：
 
 ```bash
