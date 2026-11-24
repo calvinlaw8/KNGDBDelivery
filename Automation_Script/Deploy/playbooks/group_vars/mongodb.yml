@@ -28,3 +28,5 @@ mongodb_replicaset: "rs0"
 mongodb_admin_user: "admin"
 mongodb_admin_password: "CHANGE_ME"
 mongodb_keyfile: "/etc/mongodb-keyfile"
+# HA 故障演练；仅独立授权后允许停止当前 Primary
+mongodb_failover_authorized: false

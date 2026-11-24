@@ -1,0 +1,30 @@
+---
+- name: MySQL H-104 固定 Primary 与 VIP 边界复核
+  hosts: mysql
+  gather_facts: false
+  tags: mysql-failover-boundary
+
+  tasks:
+    - name: 查询 MySQL 可写状态
+      ansible.builtin.shell:
+        cmd: mysql --defaults-extra-file=/etc/keepalived/mysql-health.cnf --batch --skip-column-names -e "SELECT IF(@@global.read_only=0 AND @@global.super_read_only=0,1,0)"
+      register: mysql_writable
+      changed_when: false
+      become: true
+      no_log: true
+
+    - name: 查询 VIP 是否由当前节点持有
+      ansible.builtin.shell:
+        cmd: ip -o addr show | grep -F "{{ mysql_vip }}" >/dev/null
+      register: mysql_vip_owned
+      changed_when: false
+      failed_when: false
+      become: true
+
+    - name: 输出 H-104 不自动提升边界
+      ansible.builtin.debug:
+        msg:
+          - "可写状态={{ mysql_writable.stdout | trim }}"
+          - "VIP持有={{ mysql_vip_owned.rc == 0 }}"
+          - "固定Primary={{ mysql_primary_ip }}"
+          - "边界=VIP漂移不等于自动主从提升；不清除read_only，不自动提升副本"

@@ -24,3 +24,5 @@ sentinel_quorum: 2
 sentinel_down_after_ms: 30000
 sentinel_failover_timeout: 180000
 sentinel_parallel_syncs: 1
+# HA 故障演练；仅独立授权后允许停止当前 Master
+redis_failover_authorized: false

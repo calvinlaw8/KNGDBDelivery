@@ -15,6 +15,8 @@ rabbitmq_cluster_hostnames: []
 
 # 仅首次部署且明确确认无须保留 RabbitMQ 数据时开启；默认禁止破坏性重建
 rabbitmq_rebuild_cluster: false
+# H-102 RabbitMQ 节点故障演练；仅显式授权时允许停止一个 queue leader
+rabbitmq_failover_authorized: false
 
 # Erlang Cookie（3 节点必须完全一致）
 erlang_cookie: "CHANGE_ME"
