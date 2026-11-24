@@ -86,6 +86,30 @@
           ansible.builtin.set_fact:
             rabbitmq_failover_queue_leader: "{{ rabbitmq_failover_queue.json.leader }}"
 
+        - name: 生成隔离消息标识
+          ansible.builtin.set_fact:
+            rabbitmq_failover_message_marker: "ecopilot-h102-{{ lookup('pipe', 'date +%s') }}"
+          no_log: true
+
+        - name: 发布隔离 quorum queue 测试消息
+          ansible.builtin.uri:
+            url: "http://localhost:{{ rabbitmq_management_port }}/api/exchanges/%2fecopilot-ha-failover/amq.default/publish"
+            method: POST
+            user: "{{ rabbitmq_admin_user }}"
+            password: "{{ rabbitmq_admin_password }}"
+            force_basic_auth: true
+            status_code: 200
+            timeout: 10
+            body_format: json
+            body:
+              properties: {}
+              routing_key: ecopilot-failover-queue
+              payload: "{{ rabbitmq_failover_message_marker }}"
+              payload_encoding: string
+          register: rabbitmq_failover_publish
+          failed_when: not (rabbitmq_failover_publish.json.routed | default(false))
+          no_log: true
+
 - name: RabbitMQ H-102 停止当前 queue leader
   hosts: rabbitmq
   gather_facts: false
@@ -152,6 +176,28 @@
       until: rabbitmq_failover_recovery.rc == 0
       failed_when: false
       become: true
+      when: inventory_hostname == rabbitmq_seed_node_ip
+
+    - name: 从隔离 quorum queue 消费测试消息
+      ansible.builtin.uri:
+        url: "http://localhost:{{ rabbitmq_management_port }}/api/queues/%2fecopilot-ha-failover/ecopilot-failover-queue/get"
+        method: POST
+        user: "{{ rabbitmq_admin_user }}"
+        password: "{{ rabbitmq_admin_password }}"
+        force_basic_auth: true
+        status_code: 200
+        timeout: 10
+        body_format: json
+        body:
+          count: 1
+          ackmode: ack_requeue_false
+          encoding: auto
+          truncate: 50000
+      register: rabbitmq_failover_consume
+      failed_when: >-
+        rabbitmq_failover_consume.json | length != 1 or
+        rabbitmq_failover_consume.json[0].payload != rabbitmq_failover_message_marker
+      no_log: true
       when: inventory_hostname == rabbitmq_seed_node_ip
 
     - name: 删除隔离演练 vhost

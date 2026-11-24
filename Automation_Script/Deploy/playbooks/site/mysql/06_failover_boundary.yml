@@ -5,13 +5,28 @@
   tags: mysql-failover-boundary
 
   tasks:
-    - name: 查询 MySQL 可写状态
+    - name: 检查 MySQL 服务状态
+      ansible.builtin.shell:
+        cmd: systemctl is-active mysql 2>/dev/null || systemctl is-active mysqld 2>/dev/null || true
+      register: mysql_service
+      changed_when: false
+      become: true
+
+    - name: 检查 MySQL 可写健康文件
+      ansible.builtin.stat:
+        path: /etc/keepalived/mysql-health.cnf
+      register: mysql_health_file
+      become: true
+
+    - name: 查询 MySQL 可写状态（已部署时）
       ansible.builtin.shell:
         cmd: mysql --defaults-extra-file=/etc/keepalived/mysql-health.cnf --batch --skip-column-names -e "SELECT IF(@@global.read_only=0 AND @@global.super_read_only=0,1,0)"
       register: mysql_writable
       changed_when: false
+      failed_when: false
       become: true
       no_log: true
+      when: mysql_health_file.stat.exists
 
     - name: 查询 VIP 是否由当前节点持有
       ansible.builtin.shell:
@@ -24,7 +39,8 @@
     - name: 输出 H-104 不自动提升边界
       ansible.builtin.debug:
         msg:
-          - "可写状态={{ mysql_writable.stdout | trim }}"
+          - "MySQL服务状态={{ mysql_service.stdout | trim }}"
+          - "可写状态={{ (mysql_writable.stdout | trim) if (mysql_health_file.stat.exists and mysql_writable is defined) else '未部署或健康文件不存在' }}"
           - "VIP持有={{ mysql_vip_owned.rc == 0 }}"
           - "固定Primary={{ mysql_primary_ip }}"
           - "边界=VIP漂移不等于自动主从提升；不清除read_only，不自动提升副本"
