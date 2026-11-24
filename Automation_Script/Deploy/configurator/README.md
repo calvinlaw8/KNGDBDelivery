@@ -64,6 +64,18 @@ python3 -m configurator cleanup-plan \
 
 计划只列出停止/禁用受控服务；配置文件、数据目录和软件包均标记为保留。存在未知归属、外部冲突、未知组件或缺失合并报告时退出码为 `2`，不得执行远端操作。
 
+O-203 当前只生成不可执行的单组件 rebuild plan。备份声明必须包含变更单、快照 ID、备份时间和已验证恢复状态：
+
+```bash
+python3 -m configurator rebuild-plan \
+	.config/managed-resources.json \
+	--reconciliation /受控位置/资源归属.json \
+	--backup-declaration /受控位置/备份声明.json \
+	--component redis
+```
+
+计划固定标记 `execute=false`，数据目录只允许 `quarantine_only`，清除 quarantine 须由后续独立确认；当前不提供执行参数，不停止服务、不移动或删除数据。
+
 正式 Bash 向导通过 NUL 分隔的标准输入调用同一渲染器，不把秘密放入命令行参数：
 
 ```bash

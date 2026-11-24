@@ -80,6 +80,11 @@ def main(argv=None) -> int:
     cleanup_parser.add_argument("manifest", type=Path)
     cleanup_parser.add_argument("--reconciliation", type=Path, required=True)
     cleanup_parser.add_argument("--components", required=True, help="comma-separated component names")
+    rebuild_parser = subparsers.add_parser("rebuild-plan", help="build a non-executing one-component rebuild plan")
+    rebuild_parser.add_argument("manifest", type=Path)
+    rebuild_parser.add_argument("--reconciliation", type=Path, required=True)
+    rebuild_parser.add_argument("--backup-declaration", type=Path, required=True)
+    rebuild_parser.add_argument("--component", required=True)
     doctor_parser = subparsers.add_parser("doctor", help="check local Python and standard-library prerequisites")
     doctor_parser.add_argument("--format", choices=("json", "text"), default="text")
     subparsers.add_parser("workbench", help="start the loopback-only offline configuration workbench")
@@ -175,6 +180,20 @@ def main(argv=None) -> int:
             plan = build_cleanup_plan(manifest, reconciliation, components)
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             print("cleanup plan failed: {0}".format(error), file=sys.stderr)
+            return 2
+        print(json.dumps(plan, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    if arguments.command == "rebuild-plan":
+        try:
+            from .rebuild import build_rebuild_plan
+
+            manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+            reconciliation = json.loads(arguments.reconciliation.read_text(encoding="utf-8"))
+            backup = json.loads(arguments.backup_declaration.read_text(encoding="utf-8"))
+            plan = build_rebuild_plan(manifest, reconciliation, arguments.component, backup)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            print("rebuild plan failed: {0}".format(error), file=sys.stderr)
             return 2
         print(json.dumps(plan, ensure_ascii=False, sort_keys=True))
         return 0
