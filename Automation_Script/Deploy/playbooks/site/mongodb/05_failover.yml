@@ -25,7 +25,7 @@
           - "{{ mongodb_admin_user }}"
           - -p
           - --eval
-          - "db.hello().primary"
+          - "db.hello().isWritablePrimary"
         stdin: "{{ mongodb_admin_password }}\n"
       register: mongodb_failover_primary
       changed_when: false
@@ -33,7 +33,8 @@
 
     - name: 保存当前 Primary
       ansible.builtin.set_fact:
-        mongodb_failover_primary_current: "{{ mongodb_failover_primary.stdout | trim }}"
+        mongodb_failover_primary_current: "{{ mongodb_failover_primary.stdout | trim == 'true' }}"
+        mongodb_failover_stopped_ip: "{{ inventory_hostname if mongodb_failover_primary.stdout | trim == 'true' else '' }}"
 
 - name: MongoDB H-103 停止当前 Primary
   hosts: mongodb
@@ -46,7 +47,7 @@
       ansible.builtin.systemd:
         name: mongod
         state: stopped
-      when: mongodb_failover_primary_current == ansible_host
+      when: mongodb_failover_primary_current | bool
       become: true
 
 - name: MongoDB H-103 等待选主并恢复
@@ -78,6 +79,7 @@
       until: mongodb_failover_writable.stdout | trim == 'true'
       failed_when: false
       no_log: true
+      when: mongodb_failover_stopped_ip | default('') != inventory_hostname
 
     - name: 恢复全部 mongod 服务
       ansible.builtin.systemd:
