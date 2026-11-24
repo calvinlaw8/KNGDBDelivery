@@ -34,6 +34,25 @@ python3 -m configurator workbench
 
 `render` 只接受一个不存在的 staging 目录，生成 `config.env`、`playbooks/group_vars/*.yml`、脱敏摘要、部署计划、配置 SHA-256 和 `managed-resources.json`。资源清单只声明本次 generation 计划新建的非敏感资源，不代表已远端核验的实际状态，不能作为清理或删除的授权依据。目录权限为 `0700`，文件权限为 `0600`；本命令不发布为当前配置，原子发布由代次管理流程负责。
 
+远端事实必须由受控只读探测单独提供，不得由清单自行推断。事实文件按主机名映射资源 ID 和状态，例如：
+
+```json
+{
+  "database-01": [
+    {"id": "redis:database-01:package:redis-server", "status": "installed", "version": "8.2.8"},
+    {"id": "redis:database-01:data_directory:/var/lib/redis", "status": "absent"}
+  ]
+}
+```
+
+合并事实时未知或外部冲突会返回退出码 `2`：
+
+```bash
+python3 -m configurator reconcile-resources \
+	.config/managed-resources.json \
+	--facts /受控位置/资源事实.json
+```
+
 正式 Bash 向导通过 NUL 分隔的标准输入调用同一渲染器，不把秘密放入命令行参数：
 
 ```bash

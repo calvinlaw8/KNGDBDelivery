@@ -73,6 +73,9 @@ def main(argv=None) -> int:
     archive_raw_parser = subparsers.add_parser("archive-legacy-raw", help="atomically archive a legacy file without interpreting it")
     archive_raw_parser.add_argument("config", type=Path)
     archive_raw_parser.add_argument("--runtime-dir", type=Path, required=True)
+    reconcile_parser = subparsers.add_parser("reconcile-resources", help="merge non-sensitive remote facts with a managed-resource declaration")
+    reconcile_parser.add_argument("manifest", type=Path)
+    reconcile_parser.add_argument("--facts", type=Path, required=True)
     doctor_parser = subparsers.add_parser("doctor", help="check local Python and standard-library prerequisites")
     doctor_parser.add_argument("--format", choices=("json", "text"), default="text")
     subparsers.add_parser("workbench", help="start the loopback-only offline configuration workbench")
@@ -143,6 +146,20 @@ def main(argv=None) -> int:
             return 2
         print(str(backup))
         return 0
+
+    if arguments.command == "reconcile-resources":
+        try:
+            from .ownership import reconcile_manifest
+
+            manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
+            facts_document = json.loads(arguments.facts.read_text(encoding="utf-8"))
+            facts = facts_document if isinstance(facts_document, dict) else {}
+            report = reconcile_manifest(manifest, facts)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            print("resource reconciliation failed: {0}".format(error), file=sys.stderr)
+            return 2
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 2 if report["blocked"] else 0
 
     if arguments.command in ("render", "render-wizard"):
         try:
