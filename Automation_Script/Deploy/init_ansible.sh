@@ -180,20 +180,20 @@ refresh_selected_topology() {
   for component in "${SELECTED_COMPONENTS[@]}"; do
     case "${component}" in
       redis)
-        SELECTED_DB_IPS+=("${REDIS_IPS[@]}")
-        SELECTED_DB_HOSTNAMES+=("${REDIS_HOSTNAMES[@]}")
+        SELECTED_DB_IPS+=(${REDIS_IPS[@]+"${REDIS_IPS[@]}"})
+        SELECTED_DB_HOSTNAMES+=(${REDIS_HOSTNAMES[@]+"${REDIS_HOSTNAMES[@]}"})
         ;;
       rabbitmq)
-        SELECTED_DB_IPS+=("${RABBITMQ_IPS[@]}")
-        SELECTED_DB_HOSTNAMES+=("${RABBITMQ_HOSTNAMES[@]}")
+        SELECTED_DB_IPS+=(${RABBITMQ_IPS[@]+"${RABBITMQ_IPS[@]}"})
+        SELECTED_DB_HOSTNAMES+=(${RABBITMQ_HOSTNAMES[@]+"${RABBITMQ_HOSTNAMES[@]}"})
         ;;
       mongodb)
-        SELECTED_DB_IPS+=("${MONGODB_IPS[@]}")
-        SELECTED_DB_HOSTNAMES+=("${MONGODB_HOSTNAMES[@]}")
+        SELECTED_DB_IPS+=(${MONGODB_IPS[@]+"${MONGODB_IPS[@]}"})
+        SELECTED_DB_HOSTNAMES+=(${MONGODB_HOSTNAMES[@]+"${MONGODB_HOSTNAMES[@]}"})
         ;;
       mysql)
-        SELECTED_DB_IPS+=("${MYSQL_IPS[@]}")
-        SELECTED_DB_HOSTNAMES+=("${MYSQL_HOSTNAMES[@]}")
+        SELECTED_DB_IPS+=(${MYSQL_IPS[@]+"${MYSQL_IPS[@]}"})
+        SELECTED_DB_HOSTNAMES+=(${MYSQL_HOSTNAMES[@]+"${MYSQL_HOSTNAMES[@]}"})
         ;;
     esac
   done

@@ -69,8 +69,12 @@ for tool in ssh sshpass; do command -v "$tool" >/dev/null 2>&1 || fail "缺少�
 
 REMOTE="${ANSIBLE_NODE_USER}@${ANSIBLE_NODE_IP}"
 ssh_run() {
-  SSHPASS="$ANSIBLE_NODE_PASS" sshpass -e ssh \
-    -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$REMOTE" "$@"
+  local command_text=$1
+  { printf '%s\n' "$ANSIBLE_NODE_PASS"; cat <<EOF
+$command_text
+EOF
+  } | SSHPASS="$ANSIBLE_NODE_PASS" sshpass -e ssh \
+    -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$REMOTE" 'sudo -S -p "" sh -s'
 }
 
 marker=$(ssh_run "sudo -n cat /etc/ecopilot-test-environment" 2>/dev/null || true)
@@ -78,22 +82,22 @@ marker=$(ssh_run "sudo -n cat /etc/ecopilot-test-environment" 2>/dev/null || tru
 
 snapshot() {
   local name=$1 destination="$EVIDENCE_DIR/$1.snapshot"
-  ssh_run "sudo -n bash -s" > "$destination" <<'REMOTE'
-set -euo pipefail
-printf 'hosts_sha256='; sudo sha256sum /etc/hosts | awk '{print $1}'
-printf 'inventory_sha256='; sudo sha256sum /etc/ansible/hosts | awk '{print $1}'
+  ssh_run "set -eu
+printf 'hosts_sha256='; sha256sum /etc/hosts | awk '{print \$1}'
+printf 'inventory_sha256='; sha256sum /etc/ansible/hosts | awk '{print \$1}'
 printf 'hosts_managed_structure\n'
-sudo awk '/^# (BEGIN|END) ECOPILOT_COMPONENT / { print }' /etc/hosts
+awk '/^# (BEGIN|END) ECOPILOT_COMPONENT / { print }' /etc/hosts
 printf 'inventory_managed_structure\n'
-sudo awk '/^# (BEGIN|END) ECOPILOT_COMPONENT / || /^\[(redis|rabbitmq|mongodb|mysql|db_all:children)\]$/ { print }' /etc/ansible/hosts
+awk '/^# (BEGIN|END) ECOPILOT_COMPONENT / || /^\[(redis|rabbitmq|mongodb|mysql|db_all:children)\]$/ { print }' /etc/ansible/hosts
 printf 'db_all_children\n'
-sudo awk '/^\[db_all:children\]$/ { inside=1; next } /^\[/ { inside=0 } inside && NF { print }' /etc/ansible/hosts
-REMOTE
+awk '/^\[db_all:children\]$/ { inside=1; next } /^\[/ { inside=0 } inside && NF { print }' /etc/ansible/hosts" > "$destination"
   chmod 600 "$destination"
 }
 
 run_scenario() {
-  local number=$1 component=$2 log="$EVIDENCE_DIR/$number.log"
+  local number="$1"
+  local component="$2"
+  local log="$EVIDENCE_DIR/$number.log"
   snapshot "$number-before"
   set +e
   DELIVERY_CONFIG_FILE="$CONFIG_FILE" bash "$SCRIPT_DIR/init_ansible.sh" deploy --yes --components "$component" > "$log" 2>&1
