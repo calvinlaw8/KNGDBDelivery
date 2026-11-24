@@ -216,4 +216,21 @@ if validate_markers "$WORK_DIR/duplicate-markers"; then
 fi
 pass '重复组件标记被拒绝'
 
+if grep -Fq 'exec env PYTHONDONTWRITEBYTECODE=1' "$SCRIPT_DIR/install.sh"; then
+  fail '工作台入口仍使用 exec 强制替换终端流程'
+fi
+grep -Fq 'for selected in ${parsed[@]+"${parsed[@]}"}' "$SCRIPT_DIR/install.sh" ||
+  fail '组件选择数组缺少 Bash 3.2 安全展开'
+pass '工作台退出后保留终端回退且组件数组兼容 Bash 3.2'
+
+selected_result=$(printf 'redis,rabbitmq\n' | /bin/bash -c '
+  set -euo pipefail
+  source "$1"
+  select_components
+  printf "%s\n" "${SELECTED_COMPONENTS[*]}"
+' bash "$SCRIPT_DIR/install.sh")
+[[ "${selected_result}" == "redis rabbitmq" ]] ||
+  fail "Bash 3.2 组件选择结果异常：${selected_result}"
+pass 'Bash 3.2 实际组件选择返回预期数组'
+
 printf 'CONTROL_PLANE_TESTS=PASS (%s)\n' "$pass_count"

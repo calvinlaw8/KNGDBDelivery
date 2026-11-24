@@ -68,8 +68,10 @@ start_workbench() {
   info "正在启动本机网页配置工作台"
   printf '请在浏览器中填写配置、执行连接预检，并在页面内确认生成和部署。\n'
   printf '终端仅显示本地 URL 与一次性配对码；按 Ctrl-C 可停止工作台。\n\n'
-  exec env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
-    "${python_bin}" -m configurator workbench
+  if ! env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python_bin}" -m configurator workbench; then
+    warn "网页配置工作台已退出；可继续使用终端配置菜单"
+  fi
 }
 
 ask() {
@@ -164,7 +166,7 @@ is_valid_subnet_prefix() {
   IFS='.'
   read -r -a parts <<< "${value}"
   IFS="${old_ifs}"
-  for part in "${parts[@]}"; do
+  for part in ${parts[@]+"${parts[@]}"}; do
     ((10#${part} <= 255)) || return 1
   done
 }
@@ -331,7 +333,7 @@ ask_database_ssh_config() {
 
 component_is_selected() {
   local component="$1" selected
-  for selected in "${SELECTED_COMPONENTS[@]}"; do
+  for selected in ${SELECTED_COMPONENTS[@]+"${SELECTED_COMPONENTS[@]}"}; do
     [[ "${component}" == "${selected}" ]] && return 0
   done
   return 1
@@ -347,7 +349,7 @@ select_components() {
       redis|rabbitmq|mongodb|mysql) ;;
       *) warn "未知组件：${component}"; return 1 ;;
     esac
-    for selected in "${parsed[@]}"; do
+    for selected in ${parsed[@]+"${parsed[@]}"}; do
       [[ "${selected}" == "${component}" ]] && { warn "组件重复：${component}"; return 1; }
     done
     parsed+=("${component}")
@@ -431,7 +433,7 @@ is_valid_ip() {
   IFS='.'
   read -r -a parts <<< "${value}"
   IFS="${old_ifs}"
-  for part in "${parts[@]}"; do
+  for part in ${parts[@]+"${parts[@]}"}; do
     ((10#${part} <= 255)) || return 1
   done
 }
@@ -465,7 +467,7 @@ reset_configuration() {
   menu_actions+=(management database_ssh reselect_components return)
   number=1
   local action
-  for action in "${menu_actions[@]}"; do
+  for action in ${menu_actions[@]+"${menu_actions[@]}"}; do
     case "${action}" in
       redis_nodes) printf '%d. Redis 节点组\n' "${number}" ;;
       redis_credentials) printf '%d. Redis 凭据\n' "${number}" ;;
@@ -660,7 +662,7 @@ show_deployment_status() {
     printf '尚无本地 checkpoint 状态记录。\n'
     return
   fi
-  for component in "${ALL_COMPONENTS[@]}"; do
+  for component in ${ALL_COMPONENTS[@]+"${ALL_COMPONENTS[@]}"}; do
     for operation in deploy verify; do
       for result in verified failed; do
         state_file="${RUNTIME_DIR}/state/${component}.${operation}.${result}"
@@ -749,6 +751,11 @@ redeploy_existing_configuration() {
 
 main() {
   [[ -t 0 && -t 1 ]] || die "install.sh 需要在交互式终端运行；请直接执行 bash Automation_Script/Deploy/install.sh"
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+      die "不支持在 Windows Git Bash/MSYS/Cygwin 直接运行 install.sh。修复步骤：1. PowerShell 执行 wsl --install -d Ubuntu-24.04；2. 在 WSL2 Ubuntu 中进入仓库目录；3. 执行 bash Automation_Script/Deploy/install.sh。不要双击 .sh 文件，不要使用文本编辑器打开方式。"
+      ;;
+  esac
 
   info "eCopilot 数据库高可用部署向导"
   warn "安全提示：本向导首次连接目标主机时不人工验证 SSH 主机指纹。"

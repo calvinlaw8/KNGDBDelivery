@@ -25,6 +25,80 @@
 
 本交付包已包含数据库运行时 `.deb`、管理节点 Ansible/Python 离线 wheel、`sshpass` 及全部 Playbook，clone 后不需要另外下载 Redis、RabbitMQ、MongoDB 或 MySQL 安装包。本包不包含真实 `config.env`，现场必须从模板创建并填写受控配置。
 
+离线载荷通过 Git LFS 管理。请勿使用 GitHub 的“Download ZIP”下载本仓库；ZIP 下载通常只会保留若干 KB 的 LFS 指针文件。
+
+克隆并还原离线载荷：
+
+```bash
+git clone <仓库地址>
+cd <仓库目录>
+git lfs install
+git lfs pull
+bash Automation_Script/Deploy/verify_delivery.sh
+```
+
+如果仓库已经克隆但首次没有安装 Git LFS，Windows 用户使用 PowerShell：
+
+```powershell
+cd <仓库目录>
+
+# 已安装 Git for Windows 时可在此重启已打开的终端
+git lfs install
+git lfs pull origin main
+git lfs checkout
+
+git lfs status
+git lfs fsck
+Get-ChildItem -Recurse ".\离线安装包" -Filter "*.deb" |
+  Measure-Object Length -Sum
+```
+
+如果 PowerShell 中的 `git lfs` 命令不存在，请先安装 Git LFS：
+
+```powershell
+winget install --id Git.GitLFS -e
+```
+
+安装完成后关闭并重新打开 PowerShell 或 Git Bash，再执行上述 `git lfs install`、`git lfs pull` 和 `git lfs checkout`。
+
+macOS/Linux 用户若仓库已经克隆但载荷仍显示为几 KB 的指针：
+
+```bash
+cd <仓库目录>
+git lfs install
+git lfs pull origin main
+git lfs checkout
+git lfs fsck
+```
+
+若安装了 Git LFS 但仍看到“LFS 文件尚未还原为真实载荷”，先重新执行 `git lfs install && git lfs pull`，再运行交付校验。仓库克隆完成后，离线载荷目录中的每个包应为实际 `.deb`/归档文件，而不是以 `version https://git-lfs.github.com/spec/v1` 开头的文本指针。
+
+### Windows 运行方式
+
+当前正式入口仅支持 macOS Bash 和 Ubuntu 24.04 amd64，不支持在 Windows PowerShell、Git Bash、MSYS 或 Cygwin 中直接运行 `install.sh`。不要双击 `.sh` 文件，也不要使用“打开方式”选择文本编辑器。
+
+Windows 用户应使用 WSL2 安装 Ubuntu 24.04，并在 WSL2 内完成克隆、Git LFS 拉取和部署：
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+进入 WSL2 Ubuntu 后：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git git-lfs bash python3 rsync sshpass openssh-client
+git lfs install
+
+git clone <仓库地址>
+cd <仓库目录>
+git lfs pull origin main
+bash Automation_Script/Deploy/verify_delivery.sh
+bash Automation_Script/Deploy/install.sh
+```
+
+如果在 Windows Git Bash 中执行 `install.sh`，脚本会明确拒绝并提示切换到 WSL2 Ubuntu 24.04，不会将其误用为受支持的部署环境。
+
 ### 交付包自检
 
 执行部署前，先在交付包根目录运行统一自检：
