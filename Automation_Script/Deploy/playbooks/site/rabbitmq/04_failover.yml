@@ -1,0 +1,167 @@
+---
+- name: RabbitMQ H-102 隔离故障演练门禁
+  hosts: rabbitmq
+  gather_facts: false
+  tags: rabbitmq-failover
+
+  tasks:
+    - name: 要求显式故障演练授权
+      ansible.builtin.assert:
+        that:
+          - rabbitmq_failover_authorized | default(false) | bool
+        fail_msg: "未授权 RabbitMQ 节点故障演练；拒绝停止服务或创建演练资源"
+
+    - name: 验证 RabbitMQ 集群节点数量
+      ansible.builtin.shell:
+        cmd: rabbitmqctl cluster_status 2>/dev/null | sed -n '/Running Nodes/,/Versions/p' | grep -c '^rabbit@'
+      register: rabbitmq_failover_running_count
+      changed_when: false
+      failed_when: rabbitmq_failover_running_count.stdout | int != 3
+      become: true
+
+- name: RabbitMQ H-102 创建隔离 quorum queue
+  hosts: rabbitmq
+  gather_facts: false
+  tags: rabbitmq-failover
+
+  tasks:
+    - name: 使用种子节点准备隔离演练 vhost 和 quorum queue
+      when: inventory_hostname == rabbitmq_seed_node_ip
+      block:
+        - name: 创建隔离演练 vhost
+          ansible.builtin.uri:
+            url: "http://localhost:{{ rabbitmq_management_port }}/api/vhosts/%2fecopilot-ha-failover"
+            method: PUT
+            user: "{{ rabbitmq_admin_user }}"
+            password: "{{ rabbitmq_admin_password }}"
+            force_basic_auth: true
+            status_code: 201
+            timeout: 10
+            body_format: json
+            body: {}
+          no_log: true
+
+        - name: 给管理员账号授权隔离演练 vhost
+          ansible.builtin.command:
+            argv:
+              - rabbitmqctl
+              - set_permissions
+              - -p
+              - /ecopilot-ha-failover
+              - "{{ rabbitmq_admin_user }}"
+              - .*
+              - .*
+              - .*
+          become: true
+
+        - name: 创建隔离持久 quorum queue
+          ansible.builtin.uri:
+            url: "http://localhost:{{ rabbitmq_management_port }}/api/queues/%2fecopilot-ha-failover/ecopilot-failover-queue"
+            method: PUT
+            user: "{{ rabbitmq_admin_user }}"
+            password: "{{ rabbitmq_admin_password }}"
+            force_basic_auth: true
+            status_code: 201
+            timeout: 10
+            body_format: json
+            body:
+              durable: true
+              arguments:
+                x-queue-type: quorum
+          no_log: true
+
+        - name: 读取当前 quorum queue leader
+          ansible.builtin.uri:
+            url: "http://localhost:{{ rabbitmq_management_port }}/api/queues/%2fecopilot-ha-failover/ecopilot-failover-queue"
+            method: GET
+            user: "{{ rabbitmq_admin_user }}"
+            password: "{{ rabbitmq_admin_password }}"
+            force_basic_auth: true
+            status_code: 200
+            timeout: 10
+          register: rabbitmq_failover_queue
+          no_log: true
+
+        - name: 保存 queue leader
+          ansible.builtin.set_fact:
+            rabbitmq_failover_queue_leader: "{{ rabbitmq_failover_queue.json.leader }}"
+
+- name: RabbitMQ H-102 停止当前 queue leader
+  hosts: rabbitmq
+  gather_facts: false
+  serial: 1
+  tags: rabbitmq-failover
+
+  tasks:
+    - name: 判断当前节点是否为 queue leader
+      ansible.builtin.shell:
+        cmd: rabbitmqctl -q eval 'node().' 2>/dev/null
+      register: rabbitmq_failover_current_node
+      changed_when: false
+      become: true
+
+    - name: 停止 queue leader RabbitMQ 服务
+      ansible.builtin.systemd:
+        name: rabbitmq-server
+        state: stopped
+      when:
+        - hostvars[rabbitmq_seed_node_ip].rabbitmq_failover_queue_leader | default('') == rabbitmq_failover_current_node.stdout | trim
+      become: true
+
+- name: RabbitMQ H-102 leader 故障窗口验证
+  hosts: rabbitmq
+  gather_facts: false
+  serial: 1
+  tags: rabbitmq-failover
+
+  tasks:
+    - name: 等待剩余节点确认集群可用
+      ansible.builtin.shell:
+        cmd: timeout 10s rabbitmq-diagnostics -q ping
+      register: rabbitmq_failover_ping
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: rabbitmq_failover_ping.rc == 0
+      failed_when: false
+      become: true
+      when: inventory_hostname != rabbitmq_seed_node_ip
+
+- name: RabbitMQ H-102 恢复并清理演练资源
+  hosts: rabbitmq
+  gather_facts: false
+  tags: rabbitmq-failover
+
+  tasks:
+    - name: 恢复所有 RabbitMQ 服务
+      ansible.builtin.systemd:
+        name: rabbitmq-server
+        state: started
+        enabled: true
+      become: true
+
+    - name: 等待 leader 返回并验证集群成员
+      ansible.builtin.shell:
+        cmd: >
+          timeout 10s rabbitmqctl cluster_status 2>/dev/null |
+          sed -n '/Running Nodes/,/Versions/p'
+      register: rabbitmq_failover_recovery
+      changed_when: false
+      retries: 24
+      delay: 5
+      until: rabbitmq_failover_recovery.rc == 0
+      failed_when: false
+      become: true
+      when: inventory_hostname == rabbitmq_seed_node_ip
+
+    - name: 删除隔离演练 vhost
+      ansible.builtin.uri:
+        url: "http://localhost:{{ rabbitmq_management_port }}/api/vhosts/%2fecopilot-ha-failover"
+        method: DELETE
+        user: "{{ rabbitmq_admin_user }}"
+        password: "{{ rabbitmq_admin_password }}"
+        force_basic_auth: true
+        status_code: [204, 404]
+        timeout: 10
+      no_log: true
+      when: inventory_hostname == rabbitmq_seed_node_ip

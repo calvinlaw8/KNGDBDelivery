@@ -43,6 +43,29 @@ grep -Fq 'test ! -e "/var/lib/rabbitmq/mnesia-isolated-' "$PLAYBOOK"
 grep -Fq 'ansible.builtin.command:' "$PLAYBOOK"
 grep -Fq '          - mv' "$PLAYBOOK"
 grep -Fq '创建干净 RabbitMQ Mnesia 目录' "$PLAYBOOK"
+grep -Fq 'rabbitmq_failover_authorized' "$SCRIPT_DIR/playbooks/group_vars/rabbitmq.yml"
+grep -Fq 'RabbitMQ H-102 隔离故障演练门禁' "$SCRIPT_DIR/playbooks/site/rabbitmq/04_failover.yml"
+grep -Fq 'rabbitmq_failover_queue_leader' "$SCRIPT_DIR/playbooks/site/rabbitmq/04_failover.yml"
+grep -Fq '/ecopilot-ha-failover' "$SCRIPT_DIR/playbooks/site/rabbitmq/04_failover.yml"
+grep -Fq 'x-queue-type: quorum' "$SCRIPT_DIR/playbooks/site/rabbitmq/04_failover.yml"
+grep -Fq '停止 queue leader RabbitMQ 服务' "$SCRIPT_DIR/playbooks/site/rabbitmq/04_failover.yml"
+grep -Fq '恢复所有 RabbitMQ 服务' "$SCRIPT_DIR/playbooks/site/rabbitmq/04_failover.yml"
+grep -Fq '删除隔离演练 vhost' "$SCRIPT_DIR/playbooks/site/rabbitmq/04_failover.yml"
+grep -Fq 'Redis H-101 故障切换门禁与基线' "$SCRIPT_DIR/playbooks/site/redis/04_failover.yml"
+grep -Fq 'redis_failover_authorized' "$SCRIPT_DIR/playbooks/group_vars/redis.yml"
+grep -Fq 'MongoDB H-103 故障切换门禁与基线' "$SCRIPT_DIR/playbooks/site/mongodb/05_failover.yml"
+grep -Fq 'mongodb_failover_authorized' "$SCRIPT_DIR/playbooks/group_vars/mongodb.yml"
+grep -Fq 'MySQL H-104 固定 Primary 与 VIP 边界复核' "$SCRIPT_DIR/playbooks/site/mysql/06_failover_boundary.yml"
+grep -Fq 'mysql_failover_authorized' "$SCRIPT_DIR/playbooks/group_vars/mysql.yml"
+grep -Fq 'REDISCLI_AUTH: "{{ redis_password }}"' "$SCRIPT_DIR/playbooks/site/redis/04_failover.yml"
+if grep -Fq -- '-a {{ redis_password }}' "$SCRIPT_DIR/playbooks/site/redis/04_failover.yml"; then
+	printf 'FAIL: Redis 故障演练密码不得进入命令参数\n' >&2
+	exit 1
+fi
+if grep -Fq -- '- "{{ mongodb_admin_password }}"' "$SCRIPT_DIR/playbooks/site/mongodb/05_failover.yml"; then
+	printf 'FAIL: MongoDB 故障演练密码不得进入命令参数\n' >&2
+	exit 1
+fi
 grep -Fq 'rabbitmq_rebuild_stage: state_isolated' "$PLAYBOOK"
 grep -Fq 'RabbitMQ 配置 - 种子节点启动' "$PLAYBOOK"
 grep -Fq '停止 App 后再加入集群' "$PLAYBOOK"
@@ -69,6 +92,8 @@ grep -Fq 'rabbitmq_start_app_result.rc == 124' "$SCRIPT_DIR/playbooks/site/rabbi
 grep -Fq '安装停服前探测 RabbitMQ 健康复用集群' "$INSTALL_PLAYBOOK"
 grep -Fq 'rabbitmq_existing_cluster_before_install' "$INSTALL_PLAYBOOK"
 grep -Fq '持久化安装前 RabbitMQ 健康复用判定' "$INSTALL_PLAYBOOK"
+grep -Fq '创建 RabbitMQ 持久化目录' "$INSTALL_PLAYBOOK"
+grep -Fq '设置 RabbitMQ 持久化目录属主' "$INSTALL_PLAYBOOK"
 grep -Fq '.ecopilot-existing-cluster-health' "$INSTALL_PLAYBOOK"
 grep -Fq '读取安装前 RabbitMQ 健康复用判定' "$PLAYBOOK"
 grep -Fq "rabbitmq_persisted_cluster_health.stdout | trim == 'true'" "$PLAYBOOK"

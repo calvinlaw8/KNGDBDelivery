@@ -25,6 +25,15 @@
         mode: "0755"
       become: true
 
+    - name: 创建 RabbitMQ 持久化目录
+      ansible.builtin.file:
+        path: /var/lib/rabbitmq
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      become: true
+
     - name: 安装停服前探测 RabbitMQ 健康复用集群
       ansible.builtin.shell:
         cmd: |
@@ -235,6 +244,15 @@
       ansible.builtin.debug:
         msg: "{{ dpkg_result.stdout_lines | select('match', '^(Setting up|Selecting|Processing)') | list }}"
       when: dpkg_result.stdout_lines is defined
+
+    - name: 设置 RabbitMQ 持久化目录属主
+      ansible.builtin.file:
+        path: /var/lib/rabbitmq
+        state: directory
+        owner: rabbitmq
+        group: rabbitmq
+        mode: "0750"
+      become: true
 
     - name: 写入统一 Erlang Cookie 供 RabbitMQ CLI 使用
       ansible.builtin.copy:

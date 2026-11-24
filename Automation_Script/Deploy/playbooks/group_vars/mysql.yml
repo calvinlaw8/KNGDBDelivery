@@ -52,4 +52,6 @@ mysql_vip_prefix: 24
 keepalived_interface: "auto"
 keepalived_router_id: 61
 keepalived_auth_pass: "CHANGE_ME"
+# H-104 边界复核只读模式；禁止自动提升或清除 read_only
+mysql_failover_authorized: false
 

@@ -1,0 +1,73 @@
+---
+- name: Redis H-101 故障切换门禁与基线
+  hosts: redis
+  gather_facts: false
+  serial: 1
+  tags: redis-failover
+
+  tasks:
+    - name: 要求显式 Redis 故障演练授权
+      ansible.builtin.assert:
+        that:
+          - redis_failover_authorized | default(false) | bool
+        fail_msg: "未授权 Redis 故障演练；拒绝停止 Redis 服务"
+
+    - name: 检查当前 Redis Master
+      ansible.builtin.shell:
+        cmd: redis-cli -p {{ redis_port }} role
+      environment:
+        REDISCLI_AUTH: "{{ redis_password }}"
+      register: redis_failover_role
+      changed_when: false
+      no_log: true
+
+    - name: 保存当前 Master 地址
+      ansible.builtin.set_fact:
+        redis_failover_is_master: "{{ (redis_failover_role.stdout_lines | first | trim) == 'master' }}"
+
+- name: Redis H-101 停止当前 Master
+  hosts: redis
+  gather_facts: false
+  serial: 1
+  tags: redis-failover
+
+  tasks:
+    - name: 停止当前 Redis Master 服务
+      ansible.builtin.systemd:
+        name: redis-server
+        state: stopped
+      when: redis_failover_is_master | default(false) | bool
+      become: true
+
+- name: Redis H-101 等待 Sentinel 和恢复
+  hosts: redis
+  gather_facts: false
+  serial: 1
+  tags: redis-failover
+
+  tasks:
+    - name: 等待 Sentinel 返回新 Master
+      ansible.builtin.shell:
+        cmd: >
+          redis-cli -p {{ sentinel_port }}
+          sentinel get-master-addr-by-name {{ sentinel_master_name }}
+      environment:
+        REDISCLI_AUTH: "{{ redis_password }}"
+      register: redis_failover_new_master
+      changed_when: false
+      retries: 24
+      delay: 5
+      until: redis_failover_new_master.rc == 0
+      failed_when: false
+      no_log: true
+
+    - name: 恢复全部 Redis 服务
+      ansible.builtin.systemd:
+        name: redis-server
+        state: started
+        enabled: true
+      become: true
+
+    - name: 清理演练提示
+      ansible.builtin.debug:
+        msg: "Redis H-101 故障窗口已结束，请核对 Sentinel 新 Master、复制状态和测试键"

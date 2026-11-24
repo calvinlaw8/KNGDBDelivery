@@ -1,0 +1,87 @@
+---
+- name: MongoDB H-103 故障切换门禁与基线
+  hosts: mongodb
+  gather_facts: false
+  serial: 1
+  tags: mongodb-failover
+
+  tasks:
+    - name: 要求显式 MongoDB 故障演练授权
+      ansible.builtin.assert:
+        that:
+          - mongodb_failover_authorized | default(false) | bool
+        fail_msg: "未授权 MongoDB 故障演练；拒绝停止 mongod"
+
+    - name: 查询当前副本集 Primary
+      ansible.builtin.command:
+        argv:
+          - mongosh
+          - admin
+          - --port
+          - "{{ mongodb_port }}"
+          - --quiet
+          - --norc
+          - -u
+          - "{{ mongodb_admin_user }}"
+          - -p
+          - --eval
+          - "db.hello().primary"
+        stdin: "{{ mongodb_admin_password }}\n"
+      register: mongodb_failover_primary
+      changed_when: false
+      no_log: true
+
+    - name: 保存当前 Primary
+      ansible.builtin.set_fact:
+        mongodb_failover_primary_current: "{{ mongodb_failover_primary.stdout | trim }}"
+
+- name: MongoDB H-103 停止当前 Primary
+  hosts: mongodb
+  gather_facts: false
+  serial: 1
+  tags: mongodb-failover
+
+  tasks:
+    - name: 停止当前 MongoDB Primary
+      ansible.builtin.systemd:
+        name: mongod
+        state: stopped
+      when: mongodb_failover_primary_current == ansible_host
+      become: true
+
+- name: MongoDB H-103 等待选主并恢复
+  hosts: mongodb
+  gather_facts: false
+  serial: 1
+  tags: mongodb-failover
+
+  tasks:
+    - name: 等待副本集恢复 Primary
+      ansible.builtin.command:
+        argv:
+          - mongosh
+          - admin
+          - --port
+          - "{{ mongodb_port }}"
+          - --quiet
+          - --norc
+          - -u
+          - "{{ mongodb_admin_user }}"
+          - -p
+          - --eval
+          - "db.hello().isWritablePrimary"
+        stdin: "{{ mongodb_admin_password }}\n"
+      register: mongodb_failover_writable
+      changed_when: false
+      retries: 24
+      delay: 5
+      until: mongodb_failover_writable.stdout | trim == 'true'
+      failed_when: false
+      no_log: true
+
+    - name: 恢复全部 mongod 服务
+      ansible.builtin.systemd:
+        name: mongod
+        state: started
+        enabled: true
+      become: true
