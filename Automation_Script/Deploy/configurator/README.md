@@ -76,6 +76,16 @@ python3 -m configurator rebuild-plan \
 
 计划固定标记 `execute=false`，数据目录只允许 `quarantine_only`，清除 quarantine 须由后续独立确认；当前不提供执行参数，不停止服务、不移动或删除数据。
 
+运行时安全审计使用只读入口：
+
+```bash
+cd Automation_Script/Deploy
+./audit_runtime.sh
+./audit_runtime.sh --self-test --output /tmp/ecopilot-o204-audit.json
+```
+
+审计不会读取或回显真实 `.runtime/config.env` 或凭据，只检查 Git 隔离、受保护目录/文件权限、源码参数与浏览器 URL 边界及 canary 落盘。报告写入 `.runtime/audit/security.json`（默认）或指定受控路径，并设为 `0600`。
+
 正式 Bash 向导通过 NUL 分隔的标准输入调用同一渲染器，不把秘密放入命令行参数：
 
 ```bash
