@@ -7,8 +7,9 @@
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
+  <a class="skip-link" href="#workspace">跳到配置工作区</a>
   <header><strong>eCopilot</strong><span>数据库高可用配置工作台</span><button id="shutdown" type="button" title="关闭工作台">关闭</button></header>
-  <main>
+  <main id="main">
     <section id="pairing">
       <h1>本地配对</h1>
       <label>输入启动终端显示的配对码<input id="pair-code" type="password" autocomplete="off"></label>
@@ -19,11 +20,11 @@
       <section id="workflow-result" class="workflow-result" aria-live="polite"><strong id="workflow-title">下一步：填写并校验配置</strong><p id="workflow-detail">连接预检通过后，生成配置；配置生成成功后，才能开始部署。</p><button id="workflow-deploy" type="button" hidden>确认部署计划并开始部署</button><button id="workflow-cancel" type="button" hidden>请求取消部署</button><button id="workflow-refresh-playbooks" type="button" hidden>发布已修复剧本并重新预检</button></section>
       <div class="split">
         <nav aria-label="配置分区"><button data-section="management">管理节点与 SSH</button><button data-section="components">部署组件</button><button data-section="topology">节点拓扑</button><button data-section="services">服务参数</button><button data-section="secrets">组件凭据</button><button data-section="advanced">高级 JSON</button></nav>
-        <div class="editor">
+        <form id="config-form" class="editor" novalidate>
           <div id="form"></div>
           <section id="advanced" class="form-section" hidden><h2>高级 JSON</h2><label for="config">JSON v1 配置<textarea id="config" spellcheck="false"></textarea></label><button id="apply-json" type="button">应用 JSON 到表单</button></section>
           <div class="actions"><input id="import-file" type="file" accept="application/json,.json" hidden><button id="restore-current" type="button">恢复当前配置到草稿</button><button id="preflight-current" type="button">预检当前部署配置</button><button id="import" type="button">导入 JSON</button><button id="export" type="button">导出脱敏 JSON</button><button id="validate" type="button">校验</button><button id="save" type="button">保存内存草稿</button><button id="preflight" type="button" disabled>连接预检</button><button id="generate" type="button" disabled>生成配置</button><button id="deploy" type="button" disabled>开始部署</button></div><div id="issues" aria-live="polite"></div><div id="preflight-results" aria-live="polite"></div>
-        </div>
+        </form>
       </div>
     </section>
   </main>

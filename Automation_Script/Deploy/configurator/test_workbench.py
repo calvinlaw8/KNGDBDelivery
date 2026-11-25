@@ -677,6 +677,14 @@ class WorkbenchTests(unittest.TestCase):
         self.assertIn("部署成功", script)
         self.assertIn("部署失败", script)
         self.assertIn("请查看终端部署日志", script)
+        self.assertIn("skip-link", html)
+        self.assertIn('id="config-form"', html)
+        self.assertIn("preventDefault()", script)
+        self.assertIn("moveFocus=false", script)
+        self.assertIn("issues.focus()", script)
+        self.assertIn("aria-current", script)
+        self.assertIn("fieldId(path)", script)
+        self.assertIn("max-width:420px", stylesheet)
 
 
 if __name__ == "__main__":
