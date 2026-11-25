@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DELIVERY_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PACKAGE_ROOT="${DELIVERY_ROOT}/离线安装包"
 MANIFEST="${DELIVERY_ROOT}/sha256-packages.txt"
+COMPATIBILITY_MANIFEST="${SCRIPT_DIR}/compatibility-manifest.json"
 CONFIGURED_MODE=0
 CONFIG_FILE="${DELIVERY_CONFIG_FILE:-${DELIVERY_ROOT}/Automation_Script/Deploy/config.env}"
 
@@ -40,8 +41,11 @@ check_required_paths() {
   for path in \
     "${PACKAGE_ROOT}" \
     "${MANIFEST}" \
+    "${COMPATIBILITY_MANIFEST}" \
+    "${DELIVERY_ROOT}/兼容矩阵.md" \
     "${DELIVERY_ROOT}/Automation_Script/Deploy/init_ansible.sh" \
     "${DELIVERY_ROOT}/Automation_Script/Deploy/validate_deb_payloads.sh" \
+    "${DELIVERY_ROOT}/Automation_Script/Deploy/test_o205_compatibility.sh" \
     "${DELIVERY_ROOT}/Automation_Script/Deploy/playbooks"; do
     [[ -e "${path}" ]] || fail "缺少交付资产：${path}"
   done
@@ -214,6 +218,77 @@ check_configurator() {
   [[ -f "${generated_schema}" ]] || fail "缺少生成的配置 Schema：${generated_schema}"
 }
 
+check_application_assets() {
+  [[ -f "${COMPATIBILITY_MANIFEST}" ]] || {
+    fail "缺少应用兼容清单：${COMPATIBILITY_MANIFEST}"
+    return
+  }
+  if PYTHONDONTWRITEBYTECODE=1 python3 - "${DELIVERY_ROOT}" "${COMPATIBILITY_MANIFEST}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+manifest_path = Path(sys.argv[2])
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except Exception as error:
+    print("FAIL: 应用兼容清单不可解析")
+    raise SystemExit(1)
+if manifest.get("schema_version") != 1 or manifest.get("offline") is not True:
+    print("FAIL: 应用兼容清单版本或离线模式非法")
+    raise SystemExit(1)
+if manifest.get("python", {}).get("minimum") != "3.9":
+    print("FAIL: 应用兼容清单 Python 下限不一致")
+    raise SystemExit(1)
+if manifest.get("python", {}).get("standard_library_only") is not True:
+    print("FAIL: 应用兼容清单声明了非标准库依赖")
+    raise SystemExit(1)
+expected = set()
+failed = False
+for asset in manifest.get("static_assets", []):
+    relative = asset.get("path")
+    if not relative or relative.startswith("/") or ".." in Path(relative).parts:
+        print("FAIL: 应用资产路径不安全")
+        failed = True
+        continue
+    expected.add(relative)
+    path = root / relative
+    if not path.is_file():
+        print("FAIL: 应用资产缺失：{0}".format(relative))
+        failed = True
+        continue
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if len(data) != asset.get("size") or digest != asset.get("sha256"):
+        print("FAIL: 应用资产大小或 SHA256 不匹配：{0}".format(relative))
+        failed = True
+    text = data.decode("utf-8", "replace")
+    if "https://" in text or "http://" in text or "cdn." in text.lower():
+        print("FAIL: 应用资产包含网络或 CDN 依赖：{0}".format(relative))
+        failed = True
+static_root = root / "Automation_Script/Deploy/configurator/workbench_static"
+actual = {
+    path.relative_to(root).as_posix()
+    for path in static_root.rglob("*")
+    if path.is_file()
+} if static_root.is_dir() else set()
+for relative in sorted(actual - expected):
+    print("FAIL: 应用资产不在兼容清单：{0}".format(relative))
+    failed = True
+if len(manifest.get("platforms", [])) < 2:
+    print("FAIL: 平台兼容矩阵不完整")
+    failed = True
+raise SystemExit(1 if failed else 0)
+PY
+  then
+    :
+  else
+    fail "应用资产完整性或兼容清单校验失败"
+  fi
+}
+
 check_required_paths
 if ((failures == 0)); then
   check_manifest_layout
@@ -225,6 +300,7 @@ if ((failures == 0)); then
   check_static_files
   check_customer_document_consistency
   check_configurator
+  check_application_assets
 fi
 
 if ((failures > 0)); then

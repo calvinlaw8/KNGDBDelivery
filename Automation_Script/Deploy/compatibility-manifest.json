@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "offline": true,
+  "python": {
+    "minimum": "3.9",
+    "bundled_runtime": false,
+    "standard_library_only": true
+  },
+  "platforms": [
+    {
+      "name": "macOS",
+      "architectures": ["arm64", "x86_64"],
+      "shell": "Bash 3.2",
+      "status": "supported",
+      "evidence": "local fixture and static syntax"
+    },
+    {
+      "name": "Ubuntu",
+      "version": "24.04",
+      "architectures": ["amd64"],
+      "shell": "Bash 5",
+      "status": "supported",
+      "evidence": "delivery fixture and amd64 package gate"
+    }
+  ],
+  "browsers": [
+    {"name": "Chrome", "minimum": "120"},
+    {"name": "Edge", "minimum": "120"},
+    {"name": "Firefox", "minimum": "115"},
+    {"name": "Safari", "minimum": "16.4"}
+  ],
+  "static_assets": [
+    {
+      "path": "Automation_Script/Deploy/configurator/workbench_static/app.css",
+      "size": 4936,
+      "sha256": "20efd8aee1bfb4db5993158bdefa4dc1572a4eb3d9f0f5f75cb8f20887f1227f",
+      "source": "repository-local"
+    },
+    {
+      "path": "Automation_Script/Deploy/configurator/workbench_static/app.js",
+      "size": 34508,
+      "sha256": "fd0310d94b2752c1473135d608421318216c817c192766be4896e0e0b0c76851",
+      "source": "repository-local"
+    },
+    {
+      "path": "Automation_Script/Deploy/configurator/workbench_static/index.html",
+      "size": 3103,
+      "sha256": "164ac0dd7e57aca26dc9a085f49cf86ef6334dec4d6cb477989b393b2e96b267",
+      "source": "repository-local"
+    },
+    {
+      "path": "Automation_Script/Deploy/configurator/workbench_static/topology.js",
+      "size": 1223,
+      "sha256": "770e6c2b50b303de70fd8e83438132880bc90dd549ccd85bec2107232dab4937",
+      "source": "repository-local"
+    }
+  ]
+}
