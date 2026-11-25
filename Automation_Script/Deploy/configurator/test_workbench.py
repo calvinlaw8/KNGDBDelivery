@@ -685,6 +685,7 @@ class WorkbenchTests(unittest.TestCase):
         self.assertIn("aria-current", script)
         self.assertIn("fieldId(path)", script)
         self.assertIn("max-width:420px", stylesheet)
+        self.assertIn("min-height:44px", stylesheet)
 
 
 if __name__ == "__main__":

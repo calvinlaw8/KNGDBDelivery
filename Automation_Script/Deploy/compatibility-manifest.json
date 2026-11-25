@@ -32,8 +32,8 @@
   "static_assets": [
     {
       "path": "Automation_Script/Deploy/configurator/workbench_static/app.css",
-      "size": 6663,
-      "sha256": "4215dd81b21a26d1eb8cf8e7b76abf92beb1a1aaab8cbdd81aee5eb9753a41ee",
+      "size": 6860,
+      "sha256": "278c98faee80146ce215be266c7d835b13a11fbca843f4e6a7b63b26322c8846",
       "source": "repository-local"
     },
     {
